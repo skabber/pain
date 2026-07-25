@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pane",
+    "crates/layout",
+    "crates/router",
+    "crates/config",
+    "crates/render",
+    "crates/session",
+    "crates/app",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+
+# Debug symbols aren't useful in a binary handed to testers who won't be
+# running it under a debugger against this source tree — stripping them
+# cuts the distributed binary from ~28MB to ~21MB for free.
+[profile.release]
+strip = true
+
+# Local-only fork of wgpu-hal 29.0.4 with one targeted fix for a real
+# upstream bug that breaks Windows transparency on any GPU with tearing
+# support. Not submitted upstream yet — see vendor/README.md for the full
+# writeup before touching this.
+[patch.crates-io]
+wgpu-hal = { path = "vendor/wgpu-hal-29.0.4" }

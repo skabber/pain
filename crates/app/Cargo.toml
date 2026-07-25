@@ -1,0 +1,52 @@
+[package]
+name = "pain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A cross-platform, multi-pane terminal emulator"
+
+[dependencies]
+anyhow = "1.0.103"
+arboard = { version = "3.6.1", default-features = false }
+config = { version = "1.0.0", path = "../config" }
+egui = "0.35.0"
+egui-wgpu = "0.35.0"
+egui-winit = "0.35.0"
+env_logger = "0.11.11"
+layout = { version = "1.0.0", path = "../layout" }
+notify = "8.2.0"
+pane = { version = "1.0.0", path = "../pane" }
+pollster = "1.0.1"
+render = { version = "1.0.0", path = "../render" }
+router = { version = "1.0.0", path = "../router" }
+session = { version = "1.0.0", path = "../session" }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+wgpu = "29.0.4"
+winit = "0.30.13"
+
+# `cargo deb` reads this to build the .deb (see `cargo install cargo-deb`,
+# then `cargo deb -p pain` from the workspace root). `depends` starts with
+# `$auto` (cargo-deb's own `dpkg-shlibdeps`-based detection, which only
+# catches libc/libgcc/libm — this binary's actual GUI dependencies aren't
+# linked, they're loaded via `dlopen` at runtime by winit/wgpu/arboard, so
+# `ldd` and anything built on it are blind to them) plus the runtime
+# libraries confirmed by hand: `strings`-ing the built binary for the
+# `.so` names it actually dlopen()s, then mapping each to its owning
+# package via `dpkg -S` — not guessed from what winit/wgpu are generally
+# known to need.
+[package.metadata.deb]
+maintainer = "Will Palmer <email.william.palmer@gmail.com>"
+copyright = "2026, Will Palmer <email.william.palmer@gmail.com>"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A cross-platform terminal emulator with a Terminator-style multi-pane UX \
+(nested splits, drag-resize, pane grouping with broadcast input), built on \
+Alacritty's VT/PTY backend with an original GPU-rendered frontend."""
+section = "x11"
+priority = "optional"
+depends = "$auto, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libvulkan1"
+recommends = "mesa-vulkan-drivers"
+assets = [
+    ["target/release/pain", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/pain/README.md", "644"],
+]

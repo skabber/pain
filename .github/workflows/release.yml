@@ -1,0 +1,151 @@
+name: Release
+
+# Push a tag matching `v*` (e.g. `v0.2.0`) to build every platform below
+# and publish a GitHub Release with short notes plus each platform's
+# archive attached. `workflow_dispatch` runs the exact same build matrix
+# without publishing anything — a safe way to test this pipeline (e.g.
+# after editing this file) without cutting a real tag/release each time;
+# its results just show up as this workflow run's own downloadable
+# artifacts instead.
+#
+# arm64 Windows/Linux builds are deliberately not included yet (noted,
+# not forgotten) — GitHub-hosted runners for those are less mature than
+# the four targets here; add them as their own matrix entries once
+# that's worth revisiting.
+#
+# Release notes come from CHANGELOG.md's top `## ...` section verbatim
+# (see the `release` job below) — following "Keep a Changelog" style,
+# rename that section from `## Unreleased` to `## vX.Y.Z` (and add a
+# fresh empty `## Unreleased` above it) as part of cutting a release, and
+# bump `[workspace.package] version` in `Cargo.toml` to match the tag.
+# Neither is enforced by this workflow — both are on the person cutting
+# the release.
+
+"on":
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # winit/wgpu/arboard load these via `dlopen` at runtime rather than
+      # linking them at compile time (confirmed by inspecting the built
+      # binary — `ldd` shows only libc/libm/libgcc_s), so these `-dev`
+      # packages are very likely not actually required just to *build* —
+      # installed anyway since a stale/broken CI build is a worse outcome
+      # than one harmless extra `apt-get` call, and this hasn't been
+      # verified in a from-scratch container.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libwayland-dev libvulkan-dev libegl1-mesa-dev
+
+      # A single command builds *and* packages the `.deb` — cargo-deb
+      # invokes `cargo build --release --target ...` itself and resolves
+      # `[package.metadata.deb] assets`' `target/release/...` paths
+      # against whatever `--target` it was given automatically (confirmed
+      # directly: running it with a pre-built-without-`--target` binary
+      # and `--no-build` fails looking for `target/<triple>/release/pain`,
+      # so letting it do its own build is what keeps the two in sync).
+      - name: Build and package .deb (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p pain --target ${{ matrix.target }}
+
+      - name: Build (Windows/macOS)
+        if: runner.os != 'Linux'
+        run: cargo build --release --target ${{ matrix.target }} -p pain
+
+      - name: Package archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="pain-${{ matrix.name }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/pain" "$stage/"
+          cp LICENSE README.md "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+          mkdir -p dist
+          mv "$stage.tar.gz" dist/
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cp target/debian/*.deb dist/
+          fi
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stage = "pain-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/pain.exe" $stage/
+          Copy-Item LICENSE, README.md $stage/
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip"
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Move-Item "$stage.zip" dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pain-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Everything between the first `## ` heading and the next one —
+      # whatever that heading is currently called (see this file's header
+      # comment on the `## Unreleased` -> `## vX.Y.Z` rename convention).
+      - name: Extract release notes from CHANGELOG.md
+        run: awk '/^## /{if (found) exit; found=1; next} found' CHANGELOG.md > release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*
+          fail_on_unmatched_files: true

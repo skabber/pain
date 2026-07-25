@@ -1,0 +1,8 @@
+[package]
+name = "router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+layout = { version = "1.0.0", path = "../layout" }

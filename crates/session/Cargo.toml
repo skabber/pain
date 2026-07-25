@@ -1,0 +1,11 @@
+[package]
+name = "session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+config = { version = "1.0.0", path = "../config" }
+layout = { version = "1.0.0", path = "../layout" }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.3"

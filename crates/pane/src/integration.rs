@@ -1,0 +1,410 @@
+//! Injects OSC 7 (cwd reporting) into shells that don't emit it on their
+//! own — entirely at spawn time, via extra arguments and a generated
+//! script file, never by editing the user's own persistent dotfiles
+//! (`.bashrc`, `$PROFILE`, ...). The generated script always sources the
+//! user's real configuration first, so nothing of theirs is lost; ours is
+//! layered on top, the same technique real terminals with shell
+//! integration (iTerm2, Windows Terminal, VS Code) use.
+//!
+//! Deliberately narrow: only shells this can positively identify (bash,
+//! PowerShell, and `wsl.exe` when its own inner shell turns out to be
+//! bash) get anything injected. Everything else — cmd.exe (which needs a
+//! different, ConEmu-style `OSC 9;9` sequence instead of OSC 7, not
+//! implemented here), `wsl.exe` when its inner shell *isn't* bash (zsh,
+//! fish, ... — forcing one would risk silently changing what a user's WSL
+//! session actually runs), and any shell this doesn't recognize — spawns
+//! exactly as it did before this existed.
+//!
+//! `Family::Wsl` is the one case that can't be decided at spawn time from
+//! the shell string alone: `wsl.exe` gives no indication up front of what
+//! runs inside it. `wsl_entrypoint`'s generated script does that detection
+//! itself, at the moment the pane actually starts, entirely inside the
+//! WSL side — see its own doc comment for why (mainly: the alternative,
+//! a synchronous pre-flight `wsl.exe` call from here to ask first, would
+//! double the number of WSL invocations and add real spawn latency for
+//! every WSL pane, not just ones that end up running bash).
+
+use std::path::{Path, PathBuf};
+
+use portable_pty::CommandBuilder;
+
+/// A shell family this module knows how to inject OSC 7 support into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Family {
+    Bash,
+    PowerShell,
+    /// `wsl.exe` specifically — its actual inner shell is decided at
+    /// runtime by the generated entrypoint script (`wsl_entrypoint`), not
+    /// here, since nothing about the shell string itself says what runs
+    /// inside the distro.
+    Wsl,
+    /// Anything else — cmd.exe, zsh, fish, a custom path this doesn't
+    /// recognize. No injection; spawns unchanged.
+    Other,
+}
+
+/// Mirrors `portable_pty::CommandBuilder::get_shell()`'s own Unix
+/// resolution exactly — `$SHELL` first, then the current user's `/etc/
+/// passwd` entry — so a shell resolved only through that second fallback
+/// still gets classified, and so still gets OSC 7 integration, correctly.
+/// Without this, a launch context where `$SHELL` isn't exported (some
+/// desktop/GUI-launcher paths, unlike an interactive terminal — a real,
+/// confirmed cause of "integration silently didn't apply") would fall
+/// straight to `Family::Other` even though `portable_pty` still correctly
+/// resolves and runs the very same shell.
+#[cfg(unix)]
+pub fn resolve_default_shell() -> Option<String> {
+    std::env::var("SHELL").ok().or_else(passwd_shell)
+}
+
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    // Matches `portable_pty::unix::get_shell()`'s own approach exactly
+    // (down to using the same raw, not-thread-safe libc call it does —
+    // no worse here than in the dependency already making this call).
+    let ent = unsafe { libc::getpwuid(libc::getuid()) };
+    if ent.is_null() {
+        return None;
+    }
+    let shell = unsafe { std::ffi::CStr::from_ptr((*ent).pw_shell) };
+    shell.to_str().ok().map(str::to_string)
+}
+
+/// Identifies a shell by its executable's basename (`bash`, not
+/// `/usr/bin/bash` or `bash.exe`), so exact install path/extension
+/// differences don't matter. Splits on `/` and `\` manually rather than
+/// via `std::path::Path` — `Path` only treats `\` as a separator when
+/// *compiled* for Windows, but a Windows-style shell path (`default_shell`
+/// in a hand-edited config, say) needs to classify correctly regardless
+/// of which OS this happens to be running on.
+pub fn classify(shell: &str) -> Family {
+    let basename = shell.rsplit(['/', '\\']).next().unwrap_or(shell).to_ascii_lowercase();
+    let stem = basename.strip_suffix(".exe").unwrap_or(&basename);
+    match stem {
+        "bash" => Family::Bash,
+        "powershell" | "pwsh" => Family::PowerShell,
+        "wsl" => Family::Wsl,
+        _ => Family::Other,
+    }
+}
+
+/// Appends whatever arguments make `family` emit OSC 7 at each new
+/// prompt, writing the generated script it depends on first (recreated
+/// unconditionally each call — cheap, and always current with this
+/// build, so nothing about it needs cleaning up or versioning). Does
+/// nothing for `Family::Other`. Failing to write the script is reported,
+/// not fatal — the pane still spawns, just without cwd tracking, same as
+/// any shell this doesn't recognize.
+pub fn apply(cmd: &mut CommandBuilder, family: Family) {
+    match family {
+        Family::Bash => {
+            let Some(path) = write_bash_integration() else { return };
+            cmd.args(["--rcfile", &path.to_string_lossy()]);
+        }
+        Family::PowerShell => {
+            cmd.args(["-NoExit", "-Command", POWERSHELL_INTEGRATION]);
+        }
+        Family::Wsl => {
+            let Some(path) = write_bash_integration() else { return };
+            let Some(wsl_bash_path) = windows_path_to_wsl_mount(&path) else {
+                eprintln!(
+                    "pane: could not translate {} into a WSL mount path; WSL panes won't have cwd tracking",
+                    path.display()
+                );
+                return;
+            };
+
+            let entrypoint_path = wsl_entrypoint_path();
+            if let Err(err) = write_script(&entrypoint_path, &wsl_entrypoint_contents(&wsl_bash_path)) {
+                eprintln!("pane: failed to write WSL entrypoint script {}: {err:#}", entrypoint_path.display());
+                return;
+            }
+            let Some(wsl_entrypoint) = windows_path_to_wsl_mount(&entrypoint_path) else {
+                eprintln!(
+                    "pane: could not translate {} into a WSL mount path; WSL panes won't have cwd tracking",
+                    entrypoint_path.display()
+                );
+                return;
+            };
+            cmd.args(["--", "sh", &wsl_entrypoint]);
+        }
+        Family::Other => {}
+    }
+}
+
+/// Writes the bash integration script (shared between `Family::Bash` and
+/// `Family::Wsl`, which reaches the same script through a translated
+/// path) and returns its Windows-side path, or `None` (logged) if writing
+/// it failed.
+fn write_bash_integration() -> Option<PathBuf> {
+    let path = bash_integration_path();
+    match write_script(&path, BASH_INTEGRATION) {
+        Ok(()) => Some(path),
+        Err(err) => {
+            eprintln!("pane: failed to write shell-integration script {}: {err:#}", path.display());
+            None
+        }
+    }
+}
+
+/// Writes `contents` to `path` atomically (write to a sibling temp file,
+/// then rename into place) rather than directly — `path` is a single
+/// fixed, shared location (not unique per spawn), so two panes spawning
+/// around the same time (opening several splits at once, say) would
+/// otherwise race: one could read a half-written file if it happened to
+/// open `--rcfile` mid-write by the other. A same-filesystem rename is
+/// atomic, so a reader only ever sees the complete old or new content,
+/// never a partial one.
+fn write_script(path: &Path, contents: &str) -> std::io::Result<()> {
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("script path has no parent directory"))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp_path = dir.join(format!(
+        ".tmp-{}-{:?}-{}",
+        std::process::id(),
+        std::thread::current().id(),
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("script")
+    ));
+    std::fs::write(&tmp_path, contents)?;
+    std::fs::rename(&tmp_path, path)
+}
+
+/// A fixed location under the system temp directory — not `config::dir()`
+/// (this crate has no reason to depend on `config` just for a path), and
+/// not a per-process-unique temp file either: this is regenerated
+/// identically on every spawn, so a stable, shared location is simpler
+/// than managing per-instance cleanup.
+fn bash_integration_path() -> PathBuf {
+    std::env::temp_dir().join("pain-shell-integration").join("shell-integration.bash")
+}
+
+/// Where `wsl_entrypoint_contents` gets written — alongside the bash
+/// integration script, since `wsl.exe`'s inner shell (if it turns out to
+/// be bash) ends up reading that same file too, just through its
+/// translated WSL mount path.
+fn wsl_entrypoint_path() -> PathBuf {
+    std::env::temp_dir().join("pain-shell-integration").join("wsl-entrypoint.sh")
+}
+
+/// Translates a Windows path (`C:\Users\Will\...`) into its default WSL2
+/// mount equivalent (`/mnt/c/Users/Will/...`) — the standard automount
+/// convention (`/etc/wsl.conf`'s default `[automount] root = /mnt/`, drive
+/// letter lowercased). A distro with a customized automount root or a
+/// remapped drive wouldn't match this — there's no way to ask `wsl.exe`
+/// for its actual mount convention without a separate synchronous
+/// round-trip before every WSL pane spawns, which isn't worth the added
+/// latency for what's already a best-effort fallback path. Returns `None`
+/// for anything that doesn't look like a drive-letter path (nothing to
+/// translate) rather than guessing.
+fn windows_path_to_wsl_mount(path: &Path) -> Option<String> {
+    let s = path.to_str()?;
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let drive = (bytes[0] as char).to_ascii_lowercase();
+    let rest = s[2..].replace('\\', "/");
+    Some(format!("/mnt/{drive}{rest}"))
+}
+
+/// A POSIX `sh` script, run as `wsl.exe -- sh <this-file's-WSL-mount-
+/// path>`, replacing `wsl.exe`'s own default bare invocation. Detects the
+/// distro's actual configured shell itself, at run time, inside the WSL
+/// side — not something decided from here at spawn time, since nothing
+/// about the shell string `wsl.exe` itself gives any indication of what
+/// runs inside. Only bash is ever specifically injected into; anything
+/// else execs the user's own real shell completely unmodified, exactly
+/// what a bare `wsl.exe` invocation would have run — never forcing a
+/// shell the user didn't already have configured as their default.
+///
+/// `bash_integration_wsl_path` is the *already WSL-mount-translated* path
+/// to the same script `Family::Bash` uses natively — passed in rather
+/// than translated here, since translation can fail (see
+/// `windows_path_to_wsl_mount`) and the caller needs to know that before
+/// deciding whether to write this file at all.
+fn wsl_entrypoint_contents(bash_integration_wsl_path: &str) -> String {
+    format!(
+        r#"shell="${{SHELL:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)}}"
+shell="${{shell:-/bin/sh}}"
+case "$(basename "$shell")" in
+    bash)
+        exec bash --rcfile "{bash_integration_wsl_path}" -i
+        ;;
+    *)
+        exec "$shell"
+        ;;
+esac
+"#
+    )
+}
+
+/// Passed to `bash --rcfile`, which otherwise replaces *all* of bash's own
+/// startup-file sourcing (not just `~/.bashrc`) — so this manually
+/// replicates what a plain interactive login shell would have read
+/// (`/etc/profile`, then the first of `.bash_profile`/`.bash_login`/
+/// `.profile` that exists), then `~/.bashrc` too, before adding the OSC 7
+/// hook. Appends to `PROMPT_COMMAND` rather than overwriting it, so a
+/// user's own `PROMPT_COMMAND` (set in any of the files above) still runs.
+const BASH_INTEGRATION: &str = r#"
+[ -f /etc/profile ] && . /etc/profile
+if [ -f "$HOME/.bash_profile" ]; then
+    . "$HOME/.bash_profile"
+elif [ -f "$HOME/.bash_login" ]; then
+    . "$HOME/.bash_login"
+elif [ -f "$HOME/.profile" ]; then
+    . "$HOME/.profile"
+fi
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+
+__pain_report_cwd() {
+    printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"
+}
+PROMPT_COMMAND="__pain_report_cwd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+"#;
+
+/// Passed to `powershell.exe -NoExit -Command`. Profile scripts still
+/// load normally before this runs (only `-NoProfile` would skip them), so
+/// `$function:prompt` here is already whatever the user's own profile
+/// defined, or PowerShell's built-in default if they never touched it —
+/// captured and wrapped, not replaced, either way.
+///
+/// Emits `OSC 9;9`, not `OSC 7` — confirmed on real hardware that a plain
+/// OSC 7 written via `Write-Host` (the legacy Windows Console API) never
+/// arrives: the prompt function installs and runs correctly (its body was
+/// read back verbatim), but nothing reaches `crate::cwd`'s scanner.
+/// Windows' own console host (ConPTY/conhost) evidently doesn't forward
+/// that sequence the way a real Unix pty passes bytes through untouched —
+/// `OSC 9;9` is the convention Windows Terminal/ConEmu actually support
+/// for this, a raw path with no `file://` wrapping or percent-encoding
+/// needed (see `crate::cwd`'s doc comment).
+const POWERSHELL_INTEGRATION: &str = "$global:PainPrevPrompt = $function:prompt; \
+function global:prompt { \
+$p = (Get-Location).Path; \
+Write-Host -NoNewline ([char]27 + ']9;9;' + $p + [char]27 + '\\'); \
+& $global:PainPrevPrompt \
+}";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn passwd_shell_finds_a_real_executable_path() {
+        let shell = passwd_shell().expect("should find a passwd entry for the current user");
+        assert!(std::path::Path::new(&shell).exists(), "expected {shell:?} to be a real path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_default_shell_returns_something_plausible() {
+        let shell = resolve_default_shell().expect("should resolve to something on any real Unix system");
+        assert!(!shell.is_empty());
+    }
+
+    #[test]
+    fn classifies_known_shells_by_file_stem_regardless_of_path_or_extension() {
+        assert_eq!(classify("bash"), Family::Bash);
+        assert_eq!(classify("/usr/bin/bash"), Family::Bash);
+        assert_eq!(classify("/bin/bash"), Family::Bash);
+        assert_eq!(classify("powershell.exe"), Family::PowerShell);
+        assert_eq!(classify("pwsh"), Family::PowerShell);
+        assert_eq!(classify("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), Family::PowerShell);
+    }
+
+    #[test]
+    fn classifies_wsl_separately_from_bash_and_powershell() {
+        assert_eq!(classify("wsl.exe"), Family::Wsl);
+        assert_eq!(classify("wsl"), Family::Wsl);
+        assert_eq!(classify("WSL.EXE"), Family::Wsl);
+    }
+
+    #[test]
+    fn classifies_everything_else_as_other() {
+        assert_eq!(classify("zsh"), Family::Other);
+        assert_eq!(classify("fish"), Family::Other);
+        assert_eq!(classify("cmd.exe"), Family::Other);
+        assert_eq!(classify("sh"), Family::Other);
+    }
+
+    #[test]
+    fn apply_is_a_no_op_for_other() {
+        let mut cmd = CommandBuilder::new("sh");
+        apply(&mut cmd, Family::Other);
+        // Nothing to assert on `cmd` directly (`CommandBuilder` doesn't
+        // expose its args for inspection) — this just guards against a
+        // panic; the real behavioral guarantee (no `--rcfile`/`-Command`
+        // args, no real shell spawned differently) is covered by the
+        // fact that `Family::Other` never reaches either write/append arm.
+    }
+
+    #[test]
+    fn apply_writes_the_bash_script_and_appends_rcfile_args() {
+        let mut cmd = CommandBuilder::new("bash");
+        apply(&mut cmd, Family::Bash);
+
+        let script_path = bash_integration_path();
+        assert!(script_path.exists(), "should have written the integration script");
+        let contents = std::fs::read_to_string(&script_path).unwrap();
+        assert!(contents.contains("PROMPT_COMMAND"));
+        assert!(contents.contains(".bashrc"));
+    }
+
+    #[test]
+    fn windows_path_to_wsl_mount_translates_the_standard_automount_layout() {
+        assert_eq!(
+            windows_path_to_wsl_mount(Path::new("C:\\Users\\Will\\file.txt")).as_deref(),
+            Some("/mnt/c/Users/Will/file.txt")
+        );
+        // Lowercased regardless of the drive letter's own case.
+        assert_eq!(
+            windows_path_to_wsl_mount(Path::new("D:\\stuff")).as_deref(),
+            Some("/mnt/d/stuff")
+        );
+    }
+
+    #[test]
+    fn windows_path_to_wsl_mount_rejects_non_drive_letter_paths() {
+        assert_eq!(windows_path_to_wsl_mount(Path::new("/already/unix/style")), None);
+        assert_eq!(windows_path_to_wsl_mount(Path::new("relative\\path")), None);
+        assert_eq!(windows_path_to_wsl_mount(Path::new("")), None);
+    }
+
+    #[test]
+    fn wsl_entrypoint_contents_embeds_the_given_path_and_execs_bash_or_the_real_shell() {
+        let contents = wsl_entrypoint_contents("/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash");
+        assert!(contents.contains("/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash"));
+        assert!(contents.contains("exec bash --rcfile"));
+        // The non-bash fallback execs whatever the distro's real shell
+        // is — never forces one the user didn't already have configured.
+        assert!(contents.contains(r#"exec "$shell""#));
+    }
+
+    // Windows-only: `apply`'s `Family::Wsl` branch translates
+    // `bash_integration_path()`/`wsl_entrypoint_path()` (both built from
+    // `std::env::temp_dir()`) through `windows_path_to_wsl_mount`, which
+    // only ever succeeds against an actual drive-letter path — on this
+    // dev sandbox (Linux), `temp_dir()` returns a plain Unix path, so
+    // translation would correctly, harmlessly fail here rather than
+    // exercise anything. `windows_path_to_wsl_mount`/
+    // `wsl_entrypoint_contents` above already cover the real logic
+    // portably, with explicit literal paths instead of the real temp dir.
+    #[cfg(windows)]
+    #[test]
+    fn apply_for_wsl_writes_both_scripts_with_a_translated_reference_between_them() {
+        let mut cmd = CommandBuilder::new("wsl.exe");
+        apply(&mut cmd, Family::Wsl);
+
+        let bash_path = bash_integration_path();
+        assert!(bash_path.exists(), "should have written the shared bash integration script");
+
+        let entrypoint_path = wsl_entrypoint_path();
+        assert!(entrypoint_path.exists(), "should have written the WSL entrypoint script");
+        let entrypoint_contents = std::fs::read_to_string(&entrypoint_path).unwrap();
+        let translated_bash_path =
+            windows_path_to_wsl_mount(&bash_path).expect("bash_integration_path should be a drive-letter path");
+        assert!(
+            entrypoint_contents.contains(&translated_bash_path),
+            "entrypoint should reference the bash script by its translated WSL path, got: {entrypoint_contents:?}"
+        );
+    }
+}

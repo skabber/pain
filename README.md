@@ -13,6 +13,14 @@ Terminator is great but is Linux/GTK-only. iTerm2 is great but is Mac only. Alac
 See [CHANGELOG.md](CHANGELOG.md) for a detailed history.
 See [releases](../../releases) for binaries.
 
+Debian/Ubuntu users can add the APT repository instead, for `apt upgrade` support:
+
+```sh
+curl -fsSL https://w-p.github.io/pain/pain-archive-keyring.asc | sudo gpg --dearmor -o /etc/apt/keyrings/pain.gpg
+echo "deb [signed-by=/etc/apt/keyrings/pain.gpg] https://w-p.github.io/pain ./" | sudo tee /etc/apt/sources.list.d/pain.list
+sudo apt update && sudo apt install pain
+```
+
 ## Built On
 
 | Layer             | Crate                | Role                                              |

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A GPG-signed APT repository (hosted on GitHub Pages) for Debian/Ubuntu,
+  published automatically on every release — `apt install`/`apt upgrade`
+  support instead of manually downloading the `.deb` each time. See the
+  README for the `sources.list` setup.
+
 ## v1.0.0
 
 - A close button on every pane's title bar, and a "Close" action on both

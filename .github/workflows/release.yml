@@ -22,12 +22,27 @@ name: Release
 # version-bump.md`, which handles the whole thing on request (bump,
 # commit, push to main, and — with the developer's explicit
 # confirmation each time — tag and push the tag too).
+#
+# `apt-repo` publishes the Linux build to a GPG-signed APT repository
+# hosted on the `gh-pages` branch (see that job for the full mechanics).
+# Like `release`, it only runs on a real tag push by default — a plain
+# `workflow_dispatch` build-matrix test shouldn't have the side effect of
+# publishing to the real public repo. The `publish_apt_repo` input is the
+# deliberate escape hatch for the one case that needs it anyway: manually
+# backfilling a version into the APT repo without cutting a new release
+# (e.g. the first time this job is added, for whatever the latest tag
+# already is).
 
 "on":
   push:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish_apt_repo:
+        description: "Also publish this run's Linux build to the APT repo (normally only a real tag push does this)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -139,11 +154,24 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Everything between the first `## ` heading and the next one —
-      # whatever that heading is currently called (see this file's header
-      # comment on the `## Unreleased` -> `## vX.Y.Z` rename convention).
+      # Everything under the heading matching *this tag* specifically —
+      # not just "the first `## ` heading found". `version-bump.md`'s own
+      # process leaves a permanent empty `## Unreleased` heading sitting
+      # above every past `## vX.Y.Z` section (that's the whole point — a
+      # place for the next round of entries to land), so "first heading"
+      # matched `## Unreleased` and grabbed nothing: confirmed on v1.0.0's
+      # actual published release, whose notes came out empty. Matching
+      # the tag name directly is what makes this correct release over
+      # release, not just for a one-off fix.
       - name: Extract release notes from CHANGELOG.md
-        run: awk '/^## /{if (found) exit; found=1; next} found' CHANGELOG.md > release_notes.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="## ${TAG}" '
+            $0 == tag { found=1; next }
+            /^## / && found { exit }
+            found { print }
+          ' CHANGELOG.md > release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -151,3 +179,99 @@ jobs:
           body_path: release_notes.md
           files: dist/*
           fail_on_unmatched_files: true
+
+  # Publishes the Linux build to a flat, GPG-signed APT repository on the
+  # `gh-pages` branch (GitHub Pages serves it as static files — no server
+  # needed). Deliberately lightweight tooling for a single-package,
+  # single-architecture repo: `dpkg-scanpackages`/`apt-ftparchive`, not
+  # reprepro/aptly, which earn their complexity with many packages or
+  # distributions. The whole sequence (scan, sign, `apt-get update`
+  # against the result) was verified end-to-end against a real `apt`
+  # before writing this job, not assumed from documentation.
+  apt-repo:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_apt_repo == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pain-linux-x86_64
+          path: incoming
+
+      # `dpkg-scanpackages`/`apt-ftparchive` come from `dpkg-dev`/
+      # `apt-utils` respectively — likely already on `ubuntu-latest`, but
+      # not verified against the actual runner image from this sandbox,
+      # so installed explicitly rather than assumed.
+      - name: Install repo-building tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
+
+      # `--multiversion` (below) is what makes it safe to layer this
+      # secret import into the same job that keeps accumulating
+      # historical `.deb`s in `pool/` — each version's own metadata
+      # survives even once a newer one exists.
+      - name: Import the repo signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          echo "$APT_SIGNING_KEY" | gpg --batch --import
+          echo "KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')" >> "$GITHUB_ENV"
+
+      # `gh-pages` won't exist on the very first run ever — `checkout`
+      # is allowed to fail here, and the next step creates it fresh
+      # exactly when that happens (`steps.checkout_pages.outcome`, not
+      # `conclusion`, is what actually reflects that under
+      # `continue-on-error`).
+      - name: Check out the existing APT repo (gh-pages), if any
+        id: checkout_pages
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: gh-pages
+          path: apt-repo
+
+      - name: Initialize gh-pages if this is the first publish ever
+        if: steps.checkout_pages.outcome != 'success'
+        run: |
+          mkdir -p apt-repo
+          cd apt-repo
+          git init -b gh-pages
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+
+      - name: Add this build's .deb to the pool
+        run: |
+          mkdir -p apt-repo/pool
+          cp incoming/*.deb apt-repo/pool/
+
+      - name: Rebuild the repository index and sign it
+        working-directory: apt-repo
+        run: |
+          touch .nojekyll
+          dpkg-scanpackages --multiversion pool > Packages
+          gzip -9c Packages > Packages.gz
+          rm -f Release
+          apt-ftparchive release . > Release
+          gpg --batch --yes --local-user "$KEYID" --detach-sign --armor -o Release.gpg Release
+          gpg --batch --yes --local-user "$KEYID" --clearsign -o InRelease Release
+          gpg --export --armor "$KEYID" > pain-archive-keyring.asc
+          cat > index.html <<EOF
+          <!doctype html><meta charset="utf-8"><title>pain APT repository</title>
+          <pre>
+          curl -fsSL https://${{ github.repository_owner }}.github.io/pain/pain-archive-keyring.asc | sudo gpg --dearmor -o /etc/apt/keyrings/pain.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/pain.gpg] https://${{ github.repository_owner }}.github.io/pain ./" | sudo tee /etc/apt/sources.list.d/pain.list
+          sudo apt update && sudo apt install pain
+          </pre>
+          EOF
+
+      - name: Commit and push gh-pages
+        working-directory: apt-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Add ${{ github.ref_name }} to apt repo" || echo "Nothing new to commit"
+          git push origin HEAD:gh-pages

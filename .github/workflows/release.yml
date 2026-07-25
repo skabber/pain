@@ -221,26 +221,21 @@ jobs:
           echo "$APT_SIGNING_KEY" | gpg --batch --import
           echo "KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')" >> "$GITHUB_ENV"
 
-      # `gh-pages` won't exist on the very first run ever — `checkout`
-      # is allowed to fail here, and the next step creates it fresh
-      # exactly when that happens (`steps.checkout_pages.outcome`, not
-      # `conclusion`, is what actually reflects that under
-      # `continue-on-error`).
-      - name: Check out the existing APT repo (gh-pages), if any
-        id: checkout_pages
+      # `gh-pages` is bootstrapped once (an empty orphan branch with just
+      # `.nojekyll`/`index.html`) and always exists from here on, so this
+      # is a plain checkout — no "create it if this is the first run"
+      # fallback needed. (An earlier version tried to do that fallback
+      # inline with `continue-on-error`, but `actions/checkout` partially
+      # initializes the target directory — `git init` plus the `origin`
+      # remote — even when the ref-resolution step itself fails, so the
+      # fallback's own `git remote add origin` collided with a remote
+      # that was already there. Simpler to guarantee the branch exists
+      # than to make that fallback correctly idempotent.)
+      - name: Check out the APT repo (gh-pages)
         uses: actions/checkout@v4
-        continue-on-error: true
         with:
           ref: gh-pages
           path: apt-repo
-
-      - name: Initialize gh-pages if this is the first publish ever
-        if: steps.checkout_pages.outcome != 'success'
-        run: |
-          mkdir -p apt-repo
-          cd apt-repo
-          git init -b gh-pages
-          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
 
       - name: Add this build's .deb to the pool
         run: |

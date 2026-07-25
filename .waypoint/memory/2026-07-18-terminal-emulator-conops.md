@@ -3274,3 +3274,97 @@
   Nothing committed — same as everything else this whole session; the
   developer said they're about to push and test the first release next,
   and now has the version/changelog side already prepared for that.
+
+  **Update — same session, continued:** Developer confirmed the first
+  release "worked without issue" — v1.0.0 built and published across all
+  four platforms via the tag push. This repo now has real history: one
+  commit (`5b6a5bc "initial"`) and the v1.0.0 tag (pushed through
+  whatever path the developer used to tag it — not present as a local
+  tag in this sandbox's clone, which just means it went out via GitHub's
+  UI/`gh`/a different checkout rather than a local `git tag` in this
+  exact working directory; nothing to reconcile).
+
+  Developer then relaxed the standing "never commit" rule, but only in
+  one specific, explicitly scoped way: the `version-bump` skill may now
+  commit and tag on its own when invoked — still never push (that
+  remains the developer's own deliberate action, since it's what
+  actually makes a release public and triggers real CI). Also asked for
+  commit messages generally to be clear, extremely concise, plainest
+  language — updated three places to match:
+  - `.waypoint/skills/version-bump.md`: rewrote the "Purpose" paragraph
+    and renamed the old "Step 4 — Report, don't commit" to "Step 4 —
+    Commit and tag" (stage exactly the edited files, commit with a
+    one-line plain message — `Bump version to <version>`, nothing more —
+    tag with `git tag -a v<version> -m "v<version>"`, never push). Also
+    folded in a real lesson from the first live run that the skill
+    document itself hadn't captured: every in-workspace path dependency
+    (`crates/app`/`router`/`session`'s own `Cargo.toml`s) pins its own
+    `version = "..."` requirement string that Cargo enforces even for
+    path deps — the skill now explicitly calls this out as a step, not
+    just something to rediscover the hard way again next time. Added a
+    `cargo build --workspace` sanity check before committing.
+  - `.waypoint/opord.md` §3d (Ongoing Duties): added a "Commit messages"
+    bullet — one line, imperative mood, plainest language, with a
+    concrete good/bad example pair (`Bump version to 1.0.0` vs. `Prepare
+    release configuration updates`). This is the durable, project-scoped
+    place for the convention (read every session via the existing
+    mandatory OPORD checklist), so no separate cross-session auto-memory
+    entry was needed for it — would just be a duplicate of what's now in
+    a project instruction file, which the memory system's own guidance
+    says not to do.
+  - `.github/workflows/release.yml`'s header comment: updated to
+    reference `version-bump.md` as what now actually performs the
+    version/changelog sync (previously the comment implied it was purely
+    a manual human step every time).
+
+  Re-ran `actionlint` against the workflow after editing its comment
+  (comment-only change, but cheap to re-verify): clean.
+
+  Nothing new committed this round either — only the three doc/skill/
+  workflow-comment files touched, all still sitting uncommitted for the
+  developer's own review, consistent with every other change this whole
+  session.
+
+  **Update — same session, continued:** Developer clarified the
+  authorization further — they actually want the skill to push too:
+  bump, commit, push to main, and *optionally* release by also pushing
+  the tag, with the version auto-calculated as already designed. The one
+  firm requirement: the skill must present the proposed version number
+  and commit message and get explicit confirmation *before* taking any
+  of those actions, not after.
+
+  Rewrote `.waypoint/skills/version-bump.md`'s process around that
+  confirmation gate rather than bolting it on:
+  - Steps 1-3 (find baseline, analyze changes, decide version + draft
+    commit message) are now explicitly documented as **read-only** —
+    nothing touched yet.
+  - New **Step 4 — Confirm before doing anything**: presents the exact
+    version and commit message, then asks (via `AskUserQuestion` or
+    plain chat) which of three things to do — bump+commit+push to main
+    only; the same plus tag+push the tag (cuts the actual release); or
+    stop to adjust first. Nothing past this point runs without an
+    explicit answer, and a developer-supplied version/message overrides
+    the proposed one.
+  - Step 5 (apply edits) now also checks the current branch is actually
+    `main` before proceeding — a safety check that wasn't needed before
+    when the skill never touched git remote state at all.
+  - Step 6 (commit + push to main) and Step 7 (tag + push the tag, only
+    if the developer picked that option in Step 4) replace the old
+    single "commit and tag, never push" step. Step 6 also explicitly
+    calls for stopping and asking rather than force-pushing if `git
+    push` is ever rejected for having diverged from the remote.
+  - Grounded the whole confirm-first design in the OPORD's own existing
+    §3c standing rule (pause before publishing/sending to an external
+    service) rather than treating it as a new, bespoke policy — pushing
+    to main and pushing a release tag both clearly qualify, so the
+    skill is just applying a rule that already existed.
+
+  Updated `.github/workflows/release.yml`'s header comment again to
+  match (it briefly said "never push" from the previous round; now
+  correctly describes the skill as doing the whole thing, gated on
+  confirmation each time). Re-ran `actionlint`: clean.
+
+  No new version bump performed this round — v1.0.0 is already out and
+  nothing has changed since. Nothing committed; only the skill/OPORD/
+  workflow-comment files touched, same as every other doc-only change
+  this session.

@@ -15,11 +15,13 @@ name: Release
 #
 # Release notes come from CHANGELOG.md's top `## ...` section verbatim
 # (see the `release` job below) — following "Keep a Changelog" style,
-# rename that section from `## Unreleased` to `## vX.Y.Z` (and add a
-# fresh empty `## Unreleased` above it) as part of cutting a release, and
-# bump `[workspace.package] version` in `Cargo.toml` to match the tag.
-# Neither is enforced by this workflow — both are on the person cutting
-# the release.
+# that section is renamed from `## Unreleased` to `## vX.Y.Z` (with a
+# fresh empty `## Unreleased` added above it) and `[workspace.package]
+# version` in `Cargo.toml` is bumped to match, before the tag is pushed.
+# Not enforced by this workflow itself — see `.waypoint/skills/
+# version-bump.md`, which handles the whole thing on request (bump,
+# commit, push to main, and — with the developer's explicit
+# confirmation each time — tag and push the tag too).
 
 "on":
   push:

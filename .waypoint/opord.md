@@ -96,6 +96,7 @@ Build, test, and document according to the plan. All code, configuration, and do
 - **README** — Update `README.md` when changes affect how someone would understand or use the project.
 - **Documents** — All prose and text documents are written in Markdown.
 - **Tone** — Prefer brevity and precision. Keep terminology simple and clear. Avoid long-winded prose.
+- **Commit messages** — One line, imperative mood, plainest language possible: state exactly what changed, nothing more. No filler, no unexplained jargon, no restating the diff, no body unless a reader genuinely cannot infer the "why" from the change itself. Good: `Bump version to 1.0.0`, `Fix crash when closing the last pane`. Bad: `Prepare release configuration updates`, `Various improvements`, `Refactor for clarity`.
 
 ### 3e. Code Standards
 

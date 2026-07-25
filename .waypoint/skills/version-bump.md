@@ -1,13 +1,15 @@
 ---
 name: version-bump
 description: >
-  Determine the next semantic version and prepare a release: analyze what's
-  changed since the last release (or, for the very first release, decide
-  the fixed starting version) and update Cargo.toml's workspace version and
-  CHANGELOG.md's heading accordingly. Use when the developer asks to bump
-  the version, cut a release, or prepare a release — or proactively, once
-  a release has ever been cut, when a substantial amount of unreleased work
-  has accumulated and it's worth flagging.
+  Determine the next semantic version, confirm it with the developer, then
+  prepare and ship it: analyze what's changed since the last release (or,
+  for the very first release, use the fixed starting version), update
+  Cargo.toml's workspace version and CHANGELOG.md's heading, commit, push
+  to main, and — if the developer confirms cutting a release now, not just
+  preparing the bump — tag and push the tag too. Use when the developer
+  asks to bump the version, cut a release, or prepare a release — or
+  proactively, once a release has ever been cut, when a substantial amount
+  of unreleased work has accumulated and it's worth flagging.
 ---
 
 # Skill: Version Bump
@@ -17,11 +19,16 @@ description: >
 Keep `Cargo.toml`'s `[workspace.package] version` and `CHANGELOG.md`'s
 release heading in sync with what has actually shipped, using a
 consistent, repeatable semver judgment instead of an ad hoc guess each
-time. This skill only edits those two files — it never commits, tags, or
-pushes. Creating the git tag is what actually triggers
-`.github/workflows/release.yml`'s build-and-publish pipeline, and that's
-the developer's own deliberate action to take, not a side effect of
-running this skill.
+time — and, once confirmed, actually ship it: commit, push to main, and
+optionally tag and push the tag (which is what triggers
+`.github/workflows/release.yml`'s build-and-publish pipeline).
+
+Pushing to main and pushing a release tag are both genuinely consequential
+— they touch the shared remote and, for the tag, trigger real CI and a
+public release. Per this project's own standing rule on confirmation
+(`.waypoint/opord.md` §3c), this skill always confirms the exact version
+and commit message with the developer *before* touching anything — not
+after. Nothing in Steps 4+ below happens without that confirmation.
 
 ## When to Use
 
@@ -69,25 +76,79 @@ Classify what's there against this project's semver mapping. This is an
 Take the **highest** tier triggered by anything in the batch — one
 breaking change outweighs ten new features.
 
-### Step 3 — Decide and apply
+### Step 3 — Decide the version and draft the commit message
 
 - First release: **1.0.0**, fixed — not a judgment call.
 - Otherwise: the baseline version bumped per the highest tier from
   Step 2 (e.g. `1.2.3` plus a new feature, no breaking changes → `1.3.0`).
+- Draft the commit message now, per the standard in
+  `.waypoint/opord.md` §3d: one line, plain language —
+  `Bump version to <version>`. Nothing more.
+
+This step is read-only. Nothing is edited, staged, or committed yet.
+
+### Step 4 — Confirm before doing anything
+
+Present the developer with exactly two things and stop until they answer:
+
+- The decided version: `v<version>`
+- The exact commit message that will be used: `Bump version to <version>`
+
+Ask which of these should happen (`AskUserQuestion`, or plainly in chat if
+that tool isn't available):
+
+1. **Bump, commit, and push to main only** — prepares the release but
+   doesn't cut it yet.
+2. **Bump, commit, push to main, then tag and push the tag** — does all
+   of the above and also cuts the release now (this is what triggers the
+   release workflow).
+3. **Stop** — the developer wants to adjust the version or message first.
+
+Do not proceed past this step without an explicit answer. If the
+developer picks a different version or message than proposed, use theirs.
+
+### Step 5 — Apply the file edits
+
+Only after Step 4 is confirmed (option 1 or 2):
+
+- Confirm the current branch is `main` (`git branch --show-current`). If
+  it isn't, stop and ask — don't assume this is still the right thing to
+  do from a feature branch.
 - Update `Cargo.toml`'s `[workspace.package] version` to the decided
   version.
+- Also update every in-workspace path dependency's own `version = "..."`
+  requirement string (currently in `crates/app`, `crates/router`, and
+  `crates/session`'s `Cargo.toml`s — check for others, this list can
+  grow) to match. Cargo enforces that requirement even for path
+  dependencies, so leaving these at the old version breaks the build
+  outright (`failed to select a version for the requirement`) — found
+  the hard way the first time this skill ran; do not skip it.
 - Rename `CHANGELOG.md`'s `## Unreleased` heading to `## v<version>`, and
-  add a fresh, empty `## Unreleased` heading above it — this is exactly
-  what `.github/workflows/release.yml`'s release job reads from once a
-  tag is actually pushed later.
+  add a fresh, empty `## Unreleased` heading above it.
+- Run `cargo build --workspace` to confirm the bump didn't break
+  anything. If it fails, fix it before continuing — never commit a
+  version bump that doesn't build.
 
-### Step 4 — Report, don't commit
+### Step 6 — Commit and push to main
 
-Tell the developer plainly: the decided version, the single strongest
-reason driving the bump tier (not an exhaustive changelog re-summary —
-they already wrote the changelog), and that the two files are edited but
-unstaged/uncommitted, ready for their own review. Do not `git commit`,
-`git tag`, or `git push`.
+- Stage exactly the files this step edited — nothing else the developer
+  may have pending.
+- Commit with the exact message confirmed in Step 4.
+- `git push`. If it's rejected because the remote has moved on (someone
+  or something else pushed in the meantime), stop and ask — never force
+  push.
+
+### Step 7 — Tag and push, only if the developer chose option 2
+
+- `git tag -a v<version> -m "v<version>"`
+- `git push origin v<version>`
+
+This is what actually triggers `.github/workflows/release.yml` and makes
+the release public. If the developer chose option 1 instead, stop after
+Step 6 — the bump is committed and pushed, but no tag exists yet, and
+running this skill again later (once they're ready) picks it up as
+Step 1's baseline check will simply find no new tag and nothing else has
+changed.
 
 ## Notes
 
@@ -99,4 +160,6 @@ unstaged/uncommitted, ready for their own review. Do not `git commit`,
   unglamorous answer — resist rounding up.
 - This skill's tier judgment is exactly that — a judgment call, not a
   mechanical calculation. If the developer disagrees with the decided
-  tier, defer to them and apply the number they want instead.
+  tier, defer to them and use the number they want instead.
+- The confirmation in Step 4 happens every time this skill runs — a past
+  confirmation doesn't carry forward to a future invocation.

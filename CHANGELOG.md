@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.1.0
+
 - A GPG-signed APT repository (hosted on GitHub Pages) for Debian/Ubuntu,
   published automatically on every release — `apt install`/`apt upgrade`
   support instead of manually downloading the `.deb` each time. See the

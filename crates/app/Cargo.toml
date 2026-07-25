@@ -8,18 +8,18 @@ description = "A cross-platform, multi-pane terminal emulator"
 [dependencies]
 anyhow = "1.0.103"
 arboard = { version = "3.6.1", default-features = false }
-config = { version = "1.0.0", path = "../config" }
+config = { version = "1.1.0", path = "../config" }
 egui = "0.35.0"
 egui-wgpu = "0.35.0"
 egui-winit = "0.35.0"
 env_logger = "0.11.11"
-layout = { version = "1.0.0", path = "../layout" }
+layout = { version = "1.1.0", path = "../layout" }
 notify = "8.2.0"
-pane = { version = "1.0.0", path = "../pane" }
+pane = { version = "1.1.0", path = "../pane" }
 pollster = "1.0.1"
-render = { version = "1.0.0", path = "../render" }
-router = { version = "1.0.0", path = "../router" }
-session = { version = "1.0.0", path = "../session" }
+render = { version = "1.1.0", path = "../render" }
+router = { version = "1.1.0", path = "../router" }
+session = { version = "1.1.0", path = "../session" }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 wgpu = "29.0.4"
 winit = "0.30.13"

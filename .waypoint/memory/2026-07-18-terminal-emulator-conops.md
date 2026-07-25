@@ -3368,3 +3368,70 @@
   nothing has changed since. Nothing committed; only the skill/OPORD/
   workflow-comment files touched, same as every other doc-only change
   this session.
+
+  **Update — same session, continued:** Moved on to the APT-over-Pages
+  phase (the third, deliberately-deferred piece from the original
+  release-engineering "what do you think" conversation). Before writing
+  any workflow YAML, verified the entire signing/packaging sequence for
+  real in this sandbox: generated a disposable throwaway GPG key,
+  `dpkg-scanpackages --multiversion` + `apt-ftparchive release` against
+  the actual `pain_1.0.0-1_amd64.deb` already built earlier this
+  session, signed both a detached `Release.gpg` and inline `InRelease`,
+  then ran a genuine `apt-get update`/`apt-cache show` in a fully
+  sandboxed apt config (`-o Dir::Etc::...` overrides, no system state
+  touched) — resolved cleanly with real `signed-by` trust, no
+  `[trusted=yes]` escape hatch needed. Chose flat-repo layout +
+  `dpkg-scanpackages`/`apt-ftparchive` over `reprepro`/`aptly` (this is
+  one package, one architecture — those tools earn their complexity
+  with many); a persistent `gh-pages` branch over GitHub's newer
+  artifact-based Pages deploy (the repo needs to *accumulate* `.deb`s
+  across releases, which the ephemeral-artifact model doesn't support).
+
+  Had the developer generate a dedicated RSA-4096 sign-only GPG key on
+  their own machine (deliberately not through this session — private
+  key material should never pass through a shared sandbox/transcript)
+  and store it as the `APT_SIGNING_KEY` repo secret. Built a new
+  `apt-repo` job in `.github/workflows/release.yml`: downloads the Linux
+  build's `.deb`, imports the key, checks out `gh-pages`, adds the `.deb`
+  to a growing `pool/`, regenerates and signs the index, publishes a
+  small `index.html` with the actual install instructions, and pushes.
+  Gated the same way as `release` (real tag pushes only, not a plain
+  `workflow_dispatch` dry run) with a `publish_apt_repo` manual-dispatch
+  input as the deliberate exception for backfilling. Updated README
+  (matching the developer's own since-revised, terser style — didn't
+  fight or revert their edits) and added a CHANGELOG entry.
+
+  **First real run failed** on the "initialize gh-pages if it doesn't
+  exist" fallback: `error: remote origin already exists`. Root cause,
+  confirmed rather than patched around blindly: `actions/checkout@v4`
+  doesn't fail cleanly when the given `ref` doesn't exist — it
+  partially initializes the target directory (`git init` + the `origin`
+  remote) *before* the ref-resolution step itself fails, so the
+  fallback step's own unconditional `git remote add origin` collided
+  with a remote `actions/checkout` had already created. The fallback's
+  own premise (`checkout` failing means nothing was created) was wrong.
+
+  Developer's read: this is over-engineered for what should be a
+  one-time bootstrap, and asked to just create the branch directly
+  instead of hardening the fallback further. Agreed — bootstrapped
+  `gh-pages` for real from this sandbox via `git worktree add --detach`
+  (kept the primary `main` checkout completely undisturbed) + `git
+  checkout --orphan gh-pages` + an empty placeholder (`.nojekyll`,
+  a plain "nothing published yet" `index.html`), committed, pushed,
+  removed the worktree. Confirmed via `git ls-remote --heads origin`
+  that `gh-pages` now exists remotely. Then deleted the whole fragile
+  try/fallback dance from the workflow — `gh-pages` is guaranteed to
+  exist from now on, so the job just does a plain `actions/checkout@v4`
+  with `ref: gh-pages`, nothing conditional. Simpler, and the actual bug
+  class (a checkout step's partial side effects on failure) can't recur
+  since there's no failure path left to trigger it.
+
+  Re-verified with `actionlint` after each edit: clean throughout.
+  Committed and pushed both rounds (the original apt-repo job + README/
+  CHANGELOG, then this simplification) — explicitly asked/re-confirmed
+  each time given this project's now-standing "confirm before push"
+  practice, not assumed as blanket ongoing authorization. Developer is
+  about to re-run the release workflow (via `workflow_dispatch` with
+  `publish_apt_repo` checked) to actually backfill v1.0.0's `.deb` into
+  the now-real `gh-pages` branch, then enable GitHub Pages on it
+  (Settings → Pages → source: `gh-pages`) — both still pending.

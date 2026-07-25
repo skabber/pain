@@ -25,24 +25,17 @@ name: Release
 #
 # `apt-repo` publishes the Linux build to a GPG-signed APT repository
 # hosted on the `gh-pages` branch (see that job for the full mechanics).
-# Like `release`, it only runs on a real tag push by default — a plain
+# Like `release`, it only runs on a real tag push — a plain
 # `workflow_dispatch` build-matrix test shouldn't have the side effect of
-# publishing to the real public repo. The `publish_apt_repo` input is the
-# deliberate escape hatch for the one case that needs it anyway: manually
-# backfilling a version into the APT repo without cutting a new release
-# (e.g. the first time this job is added, for whatever the latest tag
-# already is).
+# publishing to the real public repo. `gh-pages` itself was bootstrapped
+# once, directly, rather than by this workflow (see that job's own
+# comment) — no manual-dispatch escape hatch is needed for it.
 
 "on":
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      publish_apt_repo:
-        description: "Also publish this run's Linux build to the APT repo (normally only a real tag push does this)"
-        type: boolean
-        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -190,7 +183,7 @@ jobs:
   # before writing this job, not assumed from documentation.
   apt-repo:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish_apt_repo == 'true'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write

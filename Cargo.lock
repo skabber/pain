@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "layout"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "toml",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "pain"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "pane"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2606,7 +2606,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2622,7 +2622,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "router"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "layout",
 ]
@@ -2795,7 +2795,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "config",
  "layout",

@@ -3603,3 +3603,171 @@
   `winresource`), and code signing/notarization for macOS and Windows,
   which needs paid certificates — a spend decision, not a code one.
   Everything this round is uncommitted, pending the developer's review.
+
+  **Update — same session, continued:** Cut v1.2.0 (minor — icon/desktop
+  entry and the macOS bundle are additive, nothing breaking). Split into
+  two commits per the developer's choice: the 19-file feature commit,
+  then a version-only bump commit. Pre-ran the release-notes extraction
+  locally against the renamed `## v1.2.0` heading before pushing (559
+  bytes of real content) so the v1.0.0 empty-notes failure couldn't
+  recur silently.
+
+  All 7 jobs green, including `macos-bundle`'s first-ever execution.
+  Verified the actual shipped bundle rather than trusting the run's
+  checkmarks — downloaded `pain-macos-universal.tar.gz` and inspected it
+  on Linux (no `lipo` available, so parsed the Mach-O fat header by hand
+  in Python): `FAT_MAGIC` with 2 architectures, x86_64 (15.5 MB) and
+  arm64 (14.4 MB) both present; `Info.plist` has `__VERSION__` correctly
+  substituted to `1.2.0` and `NSHighResolutionCapable` set; `.icns`
+  starts with the `icns` magic. Release assets are exactly the four
+  intended downloads — the `macos-raw-*` intermediates correctly did
+  *not* leak in, confirming the `pattern: pain-*` filter works.
+
+  **Then the developer switched topics entirely** — asked what rendering
+  capabilities exist for shader effects (CRT/scanlines/glow/glitch) and
+  a procedural animated background. Read the full pipeline before
+  answering rather than speculating. Findings, for future reference:
+  - The renderer draws **straight to the swapchain** in a single pass
+    (`LoadOp::Clear` then one instanced draw of all glyphs + solid
+    rects). There is no intermediate texture, so **no post-processing
+    hook exists today**.
+  - `Globals` has exactly one field, `screen_size` — **no time uniform**,
+    so nothing can animate without adding one.
+  - The event loop already redraws continuously (`ControlFlow::Poll` +
+    unconditional `request_redraw` in `about_to_wait`), vsync-capped.
+  - Everything is premultiplied alpha, a hard constraint from Windows
+    DirectComposition.
+
+  Assessment given: post-processing effects need an offscreen render
+  target + fullscreen pass (self-contained refactor, visually a no-op on
+  its own — the natural first step); cheap effects (scanlines, barrel
+  warp, chromatic aberration, vignette, glitch) are a few shader
+  instructions once that exists, while real bloom needs a 3-5 pass
+  downsample/blur chain. The **animated background is the shorter path**
+  — it needs no offscreen target at all, just a fullscreen pass before
+  the grid draw plus the time uniform. Flagged three real caveats:
+  egui chrome should render *after* effects (a warped settings panel is
+  unusable); legibility matters more than looks in an app people read
+  for hours, so effects want to be opt-in and tunable; and an animated
+  background makes the currently-temporary continuous-redraw loop
+  permanent by design, which is real battery cost on a laptop. Awaiting
+  the developer's direction on which to pursue and what the background
+  should actually depict.
+
+  **Update — same session, continued:** Developer skipped the rendering
+  effects ("fluff our core user base doesn't need"), then asked what
+  killer features were missing. Rather than brainstorm, audited the code
+  and CONOPS first. Reported that the real gaps were **table stakes, not
+  exotic features** — and that one was closer to a defect: paste wrote
+  clipboard text straight to the PTY, so any multi-line paste executed
+  every line immediately. Developer agreed on all of it; named layouts
+  (the one genuine differentiator I proposed) they judged niche, and we
+  parked it. Search was "nice if easy" — deferred, it's a bigger lift
+  (needs UI, match highlighting, navigation).
+
+  Implemented, all verified with tests:
+
+  - **`crates/app/src/paste.rs`** (new, 7 tests): bracketed-paste
+    encoding + the risk rule. Wraps pastes in `ESC[200~`/`ESC[201~` when
+    the program set `TermMode::BRACKETED_PASTE`. Notably it **strips any
+    end marker embedded in the pasted text** — without that, content
+    containing a literal `ESC[201~` terminates the bracket early and
+    everything after it arrives as typed input, turning a paste of
+    attacker-influenced text into command execution. There's a test for
+    exactly that. Confirmation rule: prompt only when *not* bracketed and
+    the text has a newline that isn't the single trailing one — a lone
+    trailing newline is the everyday "copy a command and run it" case,
+    and prompting on it would just train people to dismiss the dialog.
+  - **`Screen::wants_bracketed_paste()`** in the pane crate rather than
+    reaching into `alacritty_terminal` from the app crate (which doesn't
+    depend on it directly).
+  - **Confirmation modal** in `ui.rs`: shows a summary plus a scrollable
+    read-only view of exactly what will be sent, with no close button —
+    only explicit Paste/Cancel, so a stray click can't silently drop a
+    paste. Holds the text itself rather than re-reading the clipboard on
+    confirm, so what's sent is what was shown.
+  - **`Action::Copy`/`Action::Paste`** bound to `Ctrl+Shift+C`/`V`
+    (remappable via config as `copy`/`paste`). Previously there was **no
+    keyboard paste at all** — only the right-click menu.
+  - **Word/line selection**: `SelectionKind` in the pane crate mapping to
+    `alacritty_terminal`'s existing `Semantic`/`Lines` types (already in
+    the dependency, previously unused — we only ever used `Simple`).
+    Click counting derived in `main.rs` since winit doesn't report it;
+    extracted as a free function `next_click_count` over just the
+    tracking field because taking `&mut self` conflicted with the live
+    `&mut self.graphics` borrow — which also made the cycling rule
+    testable (3 tests: cycles 1/2/3/1, times out, resets on distance).
+  - **`crates/app/src/url.rs`** (new, 9 tests): conservative URL
+    detection — explicit schemes only, no bare domains, and `file:`
+    deliberately excluded since terminals print paths constantly and
+    one-click-opening a local file is far easier to trigger by accident.
+    Column indices are **characters not bytes** (there's a test with a
+    multi-byte prefix — getting this wrong would make links unclickable
+    on any line with non-ASCII output). Wired to **Ctrl+click**, not
+    plain click, since plain click already means "select".
+
+  One test failure along the way was **my test being wrong, not the
+  code** — I asserted column 20 of `"x https://example.com y"` was
+  outside the URL when it's actually its last character. Fixed the
+  assertion and made it exhaustive (before/first/last/after) rather than
+  loosening it.
+
+  Also removed three now-dead `start_selection` wrappers superseded by
+  `start_selection_of`, rather than silencing the dead-code warnings.
+
+  Verification: workspace build/clippy clean, **52 app-crate tests**
+  (up from 33), Windows cross-target check+clippy clean, smoke launch no
+  panics. Uncommitted. Not yet exercised by hand — the paste
+  confirmation modal, Ctrl+click link opening, and double/triple-click
+  selection all need real interactive testing, which this sandbox can't
+  do.
+
+  **Update — 2026-07-26:** Bug report — transparency doesn't work on
+  macOS (developer unsure whether M1 or M2). Root-caused by reading the
+  vendored `wgpu-hal` Metal backend rather than guessing, and the chip is
+  irrelevant: **it affects every Mac, Intel and Apple Silicon alike.**
+
+  `metal/adapter.rs` advertises exactly `[Opaque, PostMultiplied]` — the
+  Metal backend *never* offers `PreMultiplied`, and `Graphics::new` only
+  enabled transparency when `PreMultiplied` was present. So on macOS the
+  check always failed, `alpha_mode` stayed `Opaque`, and
+  `render_layer.setOpaque(true)` made the window fully opaque. The
+  existing "transparency unavailable" message was verbose-only, so
+  nothing surfaced unless someone ran with `--verbose`.
+
+  Confirmed the other half was already correct: winit's macOS window
+  creation does `setOpaque(false)` + `NSColor::clearColor()` when
+  `with_transparent(true)` is requested, which this app already does on
+  every non-WSL platform. The surface alpha mode was the sole blocker.
+
+  Fix: extracted `preferred_alpha_mode(available, is_wsl,
+  allow_post_multiplied)` as a pure, testable function. Prefers
+  `PreMultiplied` everywhere (what `shader.wgsl` emits, and the only mode
+  DirectComposition accepts on Windows), falling back to
+  `PostMultiplied` **only on macOS**.
+
+  The macOS scoping is the important judgement, not an arbitrary cfg: on
+  Metal, `PostMultiplied` is a misnomer — wgpu-hal's *entire*
+  implementation of it is `setOpaque(false)`, with no format or blend
+  change (verified in `metal/surface.rs`), after which Core Animation
+  composites by its own convention, which is premultiplied. So our
+  existing premultiplied shader output is already right there. On Vulkan
+  the same enum means what it says (the compositor multiplies by alpha),
+  so accepting it generally would double-darken every translucent pixel
+  on Linux setups that advertise it. Staying opaque is the better failure
+  mode than visibly wrong colors.
+
+  5 tests cover each path (premultiplied preferred; macOS falls back;
+  other backends stay opaque on the same advertised set; WSL stays opaque
+  even when premultiplied is offered; opaque-only stays opaque).
+  Workspace build/clippy/test clean (57 app-crate tests), Windows
+  cross-target clippy clean, smoke launch fine with the WSL path
+  unchanged.
+
+  **Unverified and needs the Mac tester:** whether transparency now
+  actually appears, and whether the *colors* are right. If translucent
+  text/background looks washed out or too bright as transparency
+  increases, that would mean Core Animation wants straight alpha after
+  all and the shader needs a per-platform output path — but the reasoning
+  above says premultiplied should be correct. Uncommitted, alongside the
+  paste-safety/selection/URL work from the previous session.

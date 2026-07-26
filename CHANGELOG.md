@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## v1.3.0
+
+- Paste is now safe by default. Text is wrapped in bracketed-paste markers
+  when the running program supports them, so shells hold it on the prompt
+  for review instead of executing every line as it arrives. When the
+  program *doesn't* support them, a multi-line paste asks for confirmation
+  first and shows exactly what will be sent (`confirm_multiline_paste` in
+  config turns this off).
+- Copy and paste keyboard shortcuts: `Ctrl+Shift+C` and `Ctrl+Shift+V`
+  (both remappable as `copy`/`paste`). Previously paste was reachable only
+  through the right-click menu.
+- Double-click selects a word, triple-click selects a line.
+- `Ctrl+click` opens a URL in your browser.
+- Fixed: window transparency did nothing on macOS. The Metal backend only
+  ever offers a `PostMultiplied` composite mode, which the surface setup
+  didn't accept, so every Mac ran fully opaque regardless of the
+  configured transparency level.
+
 ## v1.2.0
 
 - An application icon, and a desktop entry on Linux — the app now appears

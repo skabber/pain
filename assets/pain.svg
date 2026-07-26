@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- The app's own "Graphite" palette: surface #14171b, border #262b31,
+       ink #dfe2e6, accent #7fa2d6. The composition is the pane tree the
+       app is about — one focused pane, a split stack beside it, and a
+       cursor block so it reads as a terminal rather than a generic
+       window-layout glyph.
+
+       Tones are baked in as literal colors rather than expressed with
+       `opacity`: ImageMagick's SVG renderer ignores the opacity
+       attribute, so a translucent source would rasterize differently
+       than it renders in a browser or a proper SVG-aware icon theme. -->
+  <rect x="4" y="4" width="248" height="248" rx="44" fill="#14171b" stroke="#262b31" stroke-width="4"/>
+  <rect x="48" y="48" width="68" height="160" rx="4" fill="#d4d9df"/>
+  <rect x="124" y="48" width="84" height="76" rx="4" fill="#565e68"/>
+  <rect x="124" y="132" width="84" height="76" rx="4" fill="#565e68"/>
+  <rect x="62" y="64" width="18" height="26" rx="2" fill="#7fa2d6"/>
+</svg>

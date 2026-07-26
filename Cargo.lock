@@ -2217,6 +2217,7 @@ dependencies = [
  "layout",
  "notify",
  "pane",
+ "png",
  "pollster",
  "render",
  "router",

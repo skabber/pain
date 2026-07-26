@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=pain
+GenericName=Terminal Emulator
+Comment=A cross-platform, multi-pane terminal emulator
+Exec=pain
+Icon=pain
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command line;tabs;splits;panes;
+StartupNotify=true
+StartupWMClass=pain

@@ -3435,3 +3435,171 @@
   `publish_apt_repo` checked) to actually backfill v1.0.0's `.deb` into
   the now-real `gh-pages` branch, then enable GitHub Pages on it
   (Settings → Pages → source: `gh-pages`) — both still pending.
+
+  **Update — same session, continued:** Developer pointed out the
+  `publish_apt_repo` manual-dispatch input was now dead weight — with
+  `gh-pages` bootstrapped directly (previous update), every future tag
+  push already triggers `apt-repo` automatically, so the one-off
+  backfill escape hatch had nothing left to do. Removed it entirely
+  (the `workflow_dispatch.inputs` block, the `|| github.event.inputs...`
+  half of `apt-repo`'s `if:`, and the header comments describing it) —
+  `apt-repo` is now gated exactly like `release`: real tag pushes only.
+  Confirmed via `gh run list` that GitHub Pages itself was already
+  enabled on `gh-pages` (a "pages build and deployment" system run had
+  already completed successfully) — one fewer manual step than expected.
+
+  Then ran the actual `version-bump` skill for the second time, exactly
+  per its own documented process: baseline = `v1.0.0` (existing tag);
+  `git log v1.0.0..HEAD` showed only the APT-repo work (a new, additive,
+  user-facing capability — install via `apt` instead of only a manual
+  `.deb`) plus two CI-internal fixes with no app-facing effect — highest
+  tier triggered is **minor**, so `v1.1.0`. Presented the exact version
+  and commit message and stopped for confirmation (`AskUserQuestion`,
+  per the skill's Step 4) before touching anything, per the developer's
+  own explicit design from two updates ago. Confirmed: bump, commit,
+  push to main, tag, and push the tag — all four together.
+
+  Executed Steps 5-7 precisely: bumped `Cargo.toml` and the three
+  internal path-dependency requirement strings (`crates/app`/`router`/
+  `session` — the exact gotcha the skill document now calls out from
+  last time, didn't get missed this round), renamed the CHANGELOG
+  heading, confirmed `cargo build --workspace` clean, committed
+  (`Bump version to 1.1.0`, bundled with the workflow cleanup from the
+  same task rather than as a separate commit — genuinely one unit of
+  work), pushed to main, tagged `v1.1.0`, pushed the tag.
+
+  **Full end-to-end verification against the real, live, production
+  result** — not just green checkmarks in the Actions UI:
+  - `gh run list`: all 6 jobs succeeded (4 platform builds, `release`,
+    `apt-repo` — the latter for the first time ever).
+  - `gh api .../releases/tags/v1.1.0 -q .body`: real CHANGELOG content,
+    263 bytes — confirms the release-notes extraction bug fix actually
+    holds up on a second, independent release, not just the one-off
+    manual edit applied to v1.0.0 after the fact.
+  - Fetched the real public URLs directly (`curl`, not just trusting the
+    workflow logs): `https://w-p.github.io/pain/`, `/pain-archive-
+    keyring.asc`, `/Packages`, `/InRelease` all 200.
+  - Ran a **real `apt-get update` + `apt-cache show`** against the
+    actual production repo (sandboxed `-o Dir::Etc::...` overrides, own
+    scratch keyring fetched fresh from the live URL) — resolved `pain
+    1.1.0-1` correctly with full GPG trust, no `[trusted=yes]` escape
+    hatch. The whole pipeline this session designed, built, debugged,
+    and now shipped is confirmed genuinely working end to end, from a
+    cold client's perspective, not just from the publishing side.
+
+  This is the first time a full release cycle (version-bump skill →
+  tag push → all three jobs → live artifacts + live APT repo) has run
+  without any manual intervention or follow-up fix. Nothing pending;
+  both v1.0.0 and v1.1.0 are real, correct, live releases.
+
+  **Update — same session, continued:** Developer asked what's needed to
+  polish up the installs, starting with an icon. Audited first: no icon
+  assets anywhere, no `.desktop` entry, no runtime window icon, and the
+  window title was still "Terminal Emulator (dev)".
+
+  Flagged that the `.desktop` entry actually matters *more* than the icon
+  for a terminal emulator specifically — without one, an `apt install`ed
+  terminal never appears in the applications menu, so the only way to
+  launch it is to type its name into some *other* terminal. A real
+  chicken-and-egg first-run problem, not just cosmetics.
+
+  Designed the icon from the app's own existing "Graphite" palette rather
+  than inventing something unrelated: a rounded dark tile (#14171b on
+  #262b31) showing the pane tree the app is actually about — one bright
+  focused pane beside a dimmer split stack — plus an accent-colored
+  (#7fa2d6) cursor block so it reads as a terminal rather than a generic
+  window-layout glyph. Rendered two treatments (uniform panes vs.
+  focused-bright/siblings-dim) at 256/48/32/16 and *looked at them* before
+  choosing; the focused-bright variant both carries more meaning and
+  survives downscaling better.
+
+  Two real bugs caught by verifying rather than assuming:
+  1. ImageMagick's SVG renderer silently ignores the `opacity` attribute,
+     so the first draft rasterized far brighter than the source described
+     — the SVG and PNGs would have disagreed on any SVG-aware icon theme.
+     Fixed by baking the tones in as literal hex fills (documented in the
+     SVG itself so nobody reintroduces `opacity` later).
+  2. ImageMagick emits **16-bit** PNGs by default. `window_icon()`
+     deliberately requires 8-bit RGBA and returns `None` on mismatch (a
+     missing icon shouldn't block launching a terminal) — so this would
+     have shipped with *no window icon at all*, silently, with nothing in
+     the logs. Regenerated everything with `-depth 8 PNG32:` and added
+     `embedded_window_icon_actually_decodes` as a regression test, since
+     the failure mode is invisible by design.
+
+  Added: `assets/pain.svg` + 8 PNG sizes; `assets/pain.desktop`
+  (validated field-by-field against the spec — `Categories`/`Keywords`
+  semicolon-terminated, `TerminalEmulator` category, `Terminal=false`
+  which correctly means "don't run me *inside* another terminal");
+  `[package.metadata.deb] assets` entries installing all of it to the
+  standard `usr/share/applications` + `hicolor` theme paths; `png 0.18.1`
+  as a direct dependency (already in the tree transitively, so it costs
+  nothing, and it keeps the PNG the single source of truth instead of a
+  second opaque raw-pixel blob); runtime `with_window_icon`; and an
+  explicit X11/Wayland app-id matching `StartupWMClass=pain` — winit
+  would otherwise derive it from `argv[0]`, which is right today but
+  breaks the desktop-entry/icon association through a symlink or rename.
+
+  Verified: workspace build/clippy clean, Windows cross-target check
+  clean, 33 app-crate tests pass, `dpkg-deb -c` confirms every file lands
+  at its correct standard path, smoke-tested a launch with no icon errors
+  or panics. Left uncommitted — the icon is a taste call the developer
+  should see before it ships.
+
+  Still open for a later pass (not started, deliberately): Windows `.exe`
+  embedded icon (needs a build script + `winresource`), a macOS `.app`
+  bundle (currently shipping a bare binary in a tarball, which macOS
+  users won't recognize as an app), and code signing/notarization for
+  both — which needs paid certificates, so it's the developer's call.
+
+  **Update — same session, continued:** Built the macOS `.app` bundle
+  (developer: "go for it", icon refinement deferred).
+
+  Chose a **universal** binary over per-architecture builds: the matrix
+  already compiled both `x86_64-apple-darwin` and `aarch64-apple-darwin`,
+  so a new `macos-bundle` job `lipo`s them into one `pain.app` — Mac users
+  get a single download that works everywhere instead of having to know
+  which CPU they have. This restructured the artifact flow: the two macOS
+  matrix entries now upload *raw binaries* named `macos-raw-*` (deliberately
+  not `pain-*`), `macos-bundle` consumes those and produces
+  `pain-macos-universal`, and the `release` job switched from
+  "download everything" to `pattern: pain-*` so the intermediates never
+  get attached to a release as bogus downloads of their own.
+
+  Added `assets/macos/Info.plist` as a reviewable file in the repo rather
+  than a heredoc buried in YAML, with `__VERSION__` substituted at build
+  time. Notable keys: `NSHighResolutionCapable` (without it macOS runs the
+  app through its 1x scaler and every glyph in the terminal grid renders
+  blurry on Retina — the single most important key here for a text-heavy
+  app), `NSSupportsAutomaticGraphicsSwitching`, and a
+  `developer-tools` category. `.icns` is generated in CI via Apple's own
+  `iconutil` from a `.iconset` — the only way to get a `.icns` Apple's
+  tooling considers correct, which is also why the job has to run on a
+  macOS runner (`lipo` and `iconutil` are both Apple-only).
+
+  Verified as much as is possible without a Mac:
+  - `Info.plist` parses via Python's `plistlib`, both as committed and
+    after `__VERSION__` substitution.
+  - Version derivation logic run for real against `v1.2.0`,
+    `v2.0.0-rc1`, `main`, `feature/icons` — tag runs yield the version,
+    non-tag `workflow_dispatch` runs correctly fall back to `0.0.0`
+    rather than writing a branch name into the bundle.
+  - Every `assets/pain-*.png` the workflow references exists, and each
+    `.iconset` entry was checked against the actual pixel dimensions of
+    its source, including the @2x doubling rule (`icon_512x512@2x.png`
+    must be 1024px, etc.) — a mapping typo would otherwise only surface
+    in CI. Generated `assets/pain-1024.png` for that last slot.
+  - The job also self-checks *inside* CI before shipping: `lipo -archs`
+    must contain both x86_64 and arm64, `plutil -lint` must accept the
+    plist, the substituted version must read back correctly, and the
+    `.icns` must be non-empty.
+  - `actionlint` clean; workspace build/clippy/tests clean.
+
+  Documented the Gatekeeper workaround in the README
+  (`xattr -dr com.apple.quarantine`) — unsigned apps are blocked on first
+  launch, and users will hit this immediately.
+
+  Still open: Windows `.exe` embedded icon (needs a build script +
+  `winresource`), and code signing/notarization for macOS and Windows,
+  which needs paid certificates — a spend decision, not a code one.
+  Everything this round is uncommitted, pending the developer's review.

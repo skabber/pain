@@ -100,6 +100,56 @@ fn platform_window_attributes(attributes: winit::window::WindowAttributes) -> wi
     attributes
 }
 
+/// The window icon shown in the taskbar, alt-tab switcher, and (on some
+/// desktops) the title bar — decoded from the same `assets/pain-64.png`
+/// the installed icon theme uses, so there's one source of truth rather
+/// than a separately-maintained copy. 64px is the useful middle: large
+/// enough that a compositor scaling it down still looks clean, small
+/// enough to keep the decode trivial.
+///
+/// Returns `None` rather than failing the launch if the icon can't be
+/// decoded — a missing icon is a cosmetic problem, not a reason to refuse
+/// to open a terminal.
+fn window_icon() -> Option<winit::window::Icon> {
+    let bytes = include_bytes!("../../../assets/pain-64.png");
+    // `Cursor`, not the slice directly: `png::Decoder` needs `BufRead +
+    // Seek`, and `&[u8]` is only the former.
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes.as_slice()));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    // `Icon::from_rgba` requires exactly 8-bit RGBA; the asset is
+    // generated that way, but a future re-export could quietly change it,
+    // and silently drawing garbage pixels would be worse than no icon.
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    buf.truncate(info.buffer_size());
+    winit::window::Icon::from_rgba(buf, info.width, info.height).ok()
+}
+
+/// Matches the `StartupWMClass` in `assets/pain.desktop`, which is how a
+/// Linux desktop associates the running window with its installed
+/// `.desktop` entry (and therefore its icon). winit would otherwise
+/// derive this from `argv[0]`'s basename, which happens to be right today
+/// but silently breaks the association if the binary is ever launched
+/// through a symlink or renamed wrapper.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn with_app_id(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    use winit::platform::wayland::WindowAttributesExtWayland;
+    use winit::platform::x11::WindowAttributesExtX11;
+    // Both traits define `with_name`, so each call is fully qualified —
+    // the window needs the id set for whichever backend it ends up on,
+    // and setting the other is harmless.
+    let attributes = WindowAttributesExtX11::with_name(attributes, "pain", "pain");
+    WindowAttributesExtWayland::with_name(attributes, "pain", "pain")
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn with_app_id(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    attributes
+}
+
 #[derive(Default)]
 struct App {
     graphics: Option<Graphics>,
@@ -128,7 +178,8 @@ impl ApplicationHandler for App {
         // clear-color alpha) needs to stay hot-reloadable at runtime
         // (Milestone 6.2), so the window itself has to support it
         // unconditionally up front.
-        let mut attributes = Window::default_attributes().with_title("Terminal Emulator (dev)");
+        let mut attributes = Window::default_attributes().with_title("pain").with_window_icon(window_icon());
+        attributes = with_app_id(attributes);
         if let Some(s) = &session {
             attributes = attributes.with_inner_size(winit::dpi::PhysicalSize::new(s.window.width, s.window.height));
         }
@@ -495,4 +546,20 @@ fn key_bytes(event: &winit::event::KeyEvent, modifiers: ModifiersState) -> Optio
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards a silent-failure mode: `window_icon` returns `None` on any
+    /// decode problem (deliberately — a missing icon shouldn't stop the
+    /// app launching), so a re-exported asset in the wrong format would
+    /// ship with no window icon at all and nothing would say so. This
+    /// caught exactly that once already: ImageMagick emits 16-bit PNGs by
+    /// default, which the 8-bit RGBA requirement rejects.
+    #[test]
+    fn embedded_window_icon_actually_decodes() {
+        assert!(window_icon().is_some(), "the embedded icon asset must decode to 8-bit RGBA");
+    }
 }

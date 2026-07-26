@@ -13,6 +13,14 @@ Terminator is great but is Linux/GTK-only. iTerm2 is great but is Mac only. Alac
 See [CHANGELOG.md](CHANGELOG.md) for a detailed history.
 See [releases](../../releases) for binaries.
 
+macOS builds ship as a universal `pain.app` (Intel and Apple Silicon in one
+download) — drag it to Applications. The app isn't code-signed yet, so
+Gatekeeper will block the first launch; clear the quarantine flag once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/pain.app
+```
+
 Debian/Ubuntu users can add the APT repository instead, for `apt upgrade` support:
 
 ```sh

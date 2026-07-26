@@ -45,19 +45,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `artifact` is the upload name. The two macOS entries are
+        # deliberately *not* named `pain-*`: they're intermediate raw
+        # binaries consumed by `macos-bundle`, and the `release` job
+        # selects only `pain-*` so these never get attached to a release
+        # as downloads of their own.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
+            artifact: pain-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
+            artifact: pain-windows-x86_64
           - os: macos-latest
             target: x86_64-apple-darwin
             name: macos-x86_64
+            artifact: macos-raw-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
             name: macos-arm64
+            artifact: macos-raw-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -97,8 +106,8 @@ jobs:
         if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} -p pain
 
-      - name: Package archive (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Package archive (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -109,9 +118,20 @@ jobs:
           tar -czf "$stage.tar.gz" "$stage"
           mkdir -p dist
           mv "$stage.tar.gz" dist/
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            cp target/debian/*.deb dist/
-          fi
+          cp target/debian/*.deb dist/
+
+      # macOS gets no archive here — just the bare binary, which the
+      # `macos-bundle` job below `lipo`s together with the other
+      # architecture's into a single universal `pain.app`. Uploading a
+      # per-architecture tarball too would mean shipping three macOS
+      # downloads where one correct one will do.
+      - name: Stage raw binary (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/pain" dist/
 
       - name: Package archive (Windows)
         if: runner.os == 'Windows'
@@ -128,12 +148,92 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pain-${{ matrix.name }}
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Combines the two macOS builds into one universal `pain.app`, so Mac
+  # users get a single download that works on both Intel and Apple
+  # Silicon instead of having to know which they have. Runs on a macOS
+  # runner because `lipo` and `iconutil` are Apple tooling — neither has
+  # a usable equivalent elsewhere, and `iconutil` is the only way to
+  # produce a `.icns` Apple's own tools consider correct.
+  macos-bundle:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the per-architecture macOS binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-raw-*
+          path: raw
+
+      - name: Assemble the universal pain.app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Tag runs give `v1.2.3`; a `workflow_dispatch` test run gives a
+          # branch name, which isn't a version at all — fall back rather
+          # than writing something nonsensical into the bundle.
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            [0-9]*) ;;
+            *) version="0.0.0" ;;
+          esac
+          echo "Bundling version $version"
+
+          app="pain.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+          lipo -create -output "$app/Contents/MacOS/pain" \
+            raw/macos-raw-x86_64/pain \
+            raw/macos-raw-arm64/pain
+          chmod +x "$app/Contents/MacOS/pain"
+
+          sed "s/__VERSION__/${version}/g" assets/macos/Info.plist > "$app/Contents/Info.plist"
+
+          # Apple's fixed `.iconset` filename convention — the @2x entries
+          # are the same pixel dimensions as the next size up, which is
+          # why several source PNGs are used twice.
+          iconset="pain.iconset"
+          mkdir -p "$iconset"
+          cp assets/pain-16.png   "$iconset/icon_16x16.png"
+          cp assets/pain-32.png   "$iconset/icon_16x16@2x.png"
+          cp assets/pain-32.png   "$iconset/icon_32x32.png"
+          cp assets/pain-64.png   "$iconset/icon_32x32@2x.png"
+          cp assets/pain-128.png  "$iconset/icon_128x128.png"
+          cp assets/pain-256.png  "$iconset/icon_128x128@2x.png"
+          cp assets/pain-256.png  "$iconset/icon_256x256.png"
+          cp assets/pain-512.png  "$iconset/icon_256x256@2x.png"
+          cp assets/pain-512.png  "$iconset/icon_512x512.png"
+          cp assets/pain-1024.png "$iconset/icon_512x512@2x.png"
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/pain.icns"
+
+          # Prove the bundle is actually what it claims to be before it
+          # ships: both architectures present, and the plist readable by
+          # Apple's own parser with the version substituted.
+          lipo -info "$app/Contents/MacOS/pain"
+          lipo -archs "$app/Contents/MacOS/pain" | grep -q x86_64
+          lipo -archs "$app/Contents/MacOS/pain" | grep -q arm64
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$version"
+          test -s "$app/Contents/Resources/pain.icns"
+
+          mkdir -p dist
+          tar -czf dist/pain-macos-universal.tar.gz "$app" LICENSE README.md
+
+      - name: Upload the macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: pain-macos-universal
           path: dist/*
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [build, macos-bundle]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -141,9 +241,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      # `pattern: pain-*` deliberately excludes the `macos-raw-*`
+      # intermediates — those are inputs to `macos-bundle`, not things a
+      # user should be offered as a download.
+      - name: Download the release artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: pain-*
           path: dist
           merge-multiple: true
 

@@ -50,6 +50,11 @@ pub struct Ui {
     /// closed — there's no separate open/closed flag to keep in sync with
     /// this.
     settings_panel: Option<SettingsDraft>,
+    /// A paste awaiting the user's confirmation: the target pane and the
+    /// full clipboard text. Held here (not re-read from the clipboard on
+    /// confirm) so what gets sent is exactly what was described in the
+    /// prompt, even if the clipboard changes while the dialog is open.
+    paste_confirm: Option<(PaneId, String)>,
 }
 
 /// What the user asked for by interacting with the menu this frame.
@@ -98,6 +103,9 @@ pub struct UiRequest {
     /// window's own close button — so whatever was being live-previewed
     /// should revert to the last saved config.
     pub settings_cancelled: bool,
+    /// The user approved a paste that had been held for confirmation —
+    /// carries the exact text that was shown in the prompt.
+    pub confirm_paste: Option<(PaneId, String)>,
 }
 
 /// The settings panel's editable fields, seeded from the live `Config` when
@@ -165,6 +173,7 @@ impl Ui {
             group_name_input: String::new(),
             swap_shell_input: String::new(),
             settings_panel: None,
+            paste_confirm: None,
         }
     }
 
@@ -183,7 +192,10 @@ impl Ui {
     /// the pane underneath — see `main.rs`'s Tab-key handling for why this
     /// matters.
     pub fn wants_keyboard_focus(&self) -> bool {
-        self.context_menu.is_some() || self.terminal_context_menu.is_some() || self.settings_panel.is_some()
+        self.context_menu.is_some()
+            || self.terminal_context_menu.is_some()
+            || self.settings_panel.is_some()
+            || self.paste_confirm.is_some()
     }
 
     /// The config that would result from applying the settings panel's
@@ -213,6 +225,13 @@ impl Ui {
     pub fn open_terminal_context_menu(&mut self, pane: PaneId, pos: (f32, f32)) {
         self.terminal_context_menu = Some((pane, egui::pos2(pos.0, pos.1)));
         self.context_menu = None;
+    }
+
+    /// Holds `text` pending the user's approval before it's pasted into
+    /// `pane` — see `crate::paste::needs_confirmation` for when this is
+    /// used instead of pasting straight away.
+    pub fn open_paste_confirm(&mut self, pane: PaneId, text: String) {
+        self.paste_confirm = Some((pane, text));
     }
 
     /// Closes whichever context menu is open, if either is. Returns
@@ -269,6 +288,8 @@ impl Ui {
         // the same closure picks up immediately — no extra frame of delay
         // before it appears.
         let mut settings_draft = self.settings_panel.take();
+        let paste_confirm = self.paste_confirm.take();
+        let mut paste_confirm_handled = false;
         let mut close_settings_panel = false;
         let mut group_name_input = core::mem::take(&mut self.group_name_input);
         let mut swap_shell_input = core::mem::take(&mut self.swap_shell_input);
@@ -505,6 +526,50 @@ impl Ui {
                             if ui.button("Close").clicked() {
                                 request.close_pane = Some(pane);
                                 close_terminal_after = true;
+                            }
+                        });
+                    });
+            }
+
+            if let Some((pane, text)) = &paste_confirm {
+                // Modal-ish: `Order::Foreground` plus a centered window,
+                // deliberately without a close button — the two explicit
+                // choices below are the only ways out, so a stray click on
+                // an `X` can't silently drop a paste the user meant to send.
+                egui::Window::new("Confirm paste")
+                    .order(egui::Order::Foreground)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(&ctx, |ui| {
+                        ui.set_width(420.0);
+                        section_header(ui, "This paste will run immediately");
+                        ui.label(
+                            "The program in this pane hasn't enabled bracketed paste, so every \
+                             line break below runs as a command the moment it arrives.",
+                        );
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new(crate::paste::summarize(text)).monospace().color(MUTED));
+                        ui.add_space(4.0);
+                        // A scrollable, read-only view of exactly what will
+                        // be sent — the whole point of the prompt is that
+                        // the user can actually look at it first.
+                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut text.as_str())
+                                    .desired_width(f32::INFINITY)
+                                    .font(egui::TextStyle::Monospace)
+                                    .interactive(false),
+                            );
+                        });
+                        ui.separator();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("Paste anyway").clicked() {
+                                request.confirm_paste = Some((*pane, text.clone()));
+                                paste_confirm_handled = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                paste_confirm_handled = true;
                             }
                         });
                     });
@@ -753,6 +818,9 @@ impl Ui {
             self.terminal_context_menu = None;
         }
         self.settings_panel = if close_settings_panel { None } else { settings_draft };
+        if !paste_confirm_handled {
+            self.paste_confirm = paste_confirm;
+        }
 
         self.state.handle_platform_output(window, full_output.platform_output.clone());
         (request, full_output)

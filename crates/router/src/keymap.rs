@@ -72,6 +72,10 @@ pub enum Action {
     Resize(Direction),
     ToggleZoom,
     SetBroadcastMode(BroadcastMode),
+    /// Copy the focused pane's current selection to the system clipboard.
+    Copy,
+    /// Paste the system clipboard into the focused pane.
+    Paste,
 }
 
 /// A remappable table of chord -> action bindings.
@@ -126,6 +130,13 @@ impl Keymap {
         keymap.bind(Chord::new(Key::Right).ctrl().shift(), Action::Resize(Direction::Right));
 
         keymap.bind(Chord::new(Key::Char('x')).ctrl().shift(), Action::ToggleZoom);
+
+        // Ctrl+Shift+C/V rather than plain Ctrl+C/V: the unshifted pair is
+        // spoken for by the terminal itself (Ctrl+C is SIGINT, Ctrl+V is
+        // readline's literal-next), which is exactly why every Linux
+        // terminal settled on the shifted variants for clipboard access.
+        keymap.bind(Chord::new(Key::Char('c')).ctrl().shift(), Action::Copy);
+        keymap.bind(Chord::new(Key::Char('v')).ctrl().shift(), Action::Paste);
 
         keymap
     }
@@ -249,6 +260,8 @@ fn parse_action(s: &str) -> Option<Action> {
         "broadcast_off" => Action::SetBroadcastMode(BroadcastMode::Off),
         "broadcast_group" => Action::SetBroadcastMode(BroadcastMode::Group),
         "broadcast_all" => Action::SetBroadcastMode(BroadcastMode::All),
+        "copy" => Action::Copy,
+        "paste" => Action::Paste,
         _ => return None,
     })
 }

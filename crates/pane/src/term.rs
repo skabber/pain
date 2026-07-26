@@ -221,14 +221,35 @@ impl Screen {
         *self.term.mode()
     }
 
+    /// Whether the running program has enabled bracketed paste (DECSET
+    /// 2004). When it has, pasted text should be wrapped in the
+    /// bracketed-paste markers so the program can tell a paste from
+    /// typing — see the `paste` module in the app crate. Exposed as a
+    /// plain bool so callers don't need to depend on
+    /// `alacritty_terminal`'s own `TermMode` type just to ask.
+    pub fn wants_bracketed_paste(&self) -> bool {
+        self.term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE)
+    }
+
     /// Starts a fresh in-grid text selection at 0-indexed (row, col),
     /// replacing whatever selection (if any) was already active. Used for
     /// mouse-drag selection when the pane's program hasn't turned on mouse
     /// reporting — always `Side::Left`/`SelectionType::Simple` since a
     /// per-half-cell click side isn't tracked at this granularity yet.
-    pub fn start_selection(&mut self, row: usize, col: usize) {
+    /// Starts a selection of a given granularity — a plain character drag,
+    /// or the whole word/line under the point (what double- and
+    /// triple-click produce in every other terminal). Word and line
+    /// selections still track further mouse movement, extending by that
+    /// same unit, which is what `alacritty_terminal`'s own `Semantic` and
+    /// `Lines` types give for free.
+    pub fn start_selection_of(&mut self, row: usize, col: usize, kind: SelectionKind) {
         let point = Point::new(Line(row as i32), Column(col));
-        self.term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+        let ty = match kind {
+            SelectionKind::Character => SelectionType::Simple,
+            SelectionKind::Word => SelectionType::Semantic,
+            SelectionKind::Line => SelectionType::Lines,
+        };
+        self.term.selection = Some(Selection::new(ty, point, Side::Left));
     }
 
     /// Extends the in-progress selection (if any) to 0-indexed (row, col).
@@ -356,4 +377,15 @@ mod tests {
         let rows = screen.visible_rows();
         assert_eq!(rows[2], "    hi");
     }
+}
+
+/// How much text one selection gesture covers. Maps onto
+/// `alacritty_terminal`'s selection types, but kept as its own enum so
+/// callers (the app crate) don't need to depend on that crate directly
+/// just to ask for a word selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Character,
+    Word,
+    Line,
 }

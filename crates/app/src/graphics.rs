@@ -649,6 +649,16 @@ impl Graphics {
                 self.router.broadcast_mode = mode;
                 true
             }
+            // Both act on the focused pane, not a right-clicked one —
+            // there's no pointer involved in a keyboard chord.
+            router::Action::Copy => {
+                self.copy_selection(self.focused);
+                true
+            }
+            router::Action::Paste => {
+                self.paste_into_pane(self.focused);
+                true
+            }
         })
     }
 
@@ -993,6 +1003,28 @@ impl Graphics {
         Some((col, row))
     }
 
+    /// The URL under `pos`, if the cell there is part of one. Reads the
+    /// row's text straight from the visible grid, so it works on whatever
+    /// is on screen right now including scrolled-back history — there's
+    /// no separate index of links to keep in sync.
+    pub fn url_at(&self, pos: (f32, f32)) -> Option<String> {
+        let pane = self.pane_at(pos)?;
+        let (col, row) = self.cell_at(pane, pos)?;
+        let session = self.panes.get(&pane)?;
+        let cells = session.screen().visible_cells();
+        let line: String = cells.get(row)?.iter().map(|c| c.c).collect();
+        crate::url::at_column(&line, col)
+    }
+
+    /// Opens `url` with whatever the OS considers the right handler.
+    /// Failures are reported and swallowed — an unopenable link is not a
+    /// reason to disturb the terminal session around it.
+    pub fn open_url(url: &str) {
+        if let Err(err) = webbrowser::open(url) {
+            eprintln!("failed to open {url}: {err:#}");
+        }
+    }
+
     /// Whether a mouse-reporting gesture (press-to-release) is in progress.
     pub fn is_mouse_reporting(&self) -> bool {
         self.mouse_gesture.is_some()
@@ -1070,7 +1102,10 @@ impl Graphics {
     /// Clears any selection left over in every other pane first — only one
     /// pane's selection is ever highlighted/copyable at a time. Returns
     /// whether a selection started.
-    pub fn start_selection(&mut self, pos: (f32, f32)) -> bool {
+    /// Starts a selection of the given granularity at `pos` — character
+    /// for a single click, word for a double, line for a triple (see
+    /// `App::click_count` in `main.rs`, which decides which).
+    pub fn start_selection_of(&mut self, pos: (f32, f32), kind: pane::SelectionKind) -> bool {
         let Some(pane) = self.pane_at(pos) else { return false };
         let Some((col, row)) = self.cell_at(pane, pos) else { return false };
         for (other_pane, session) in self.panes.iter_mut() {
@@ -1079,7 +1114,7 @@ impl Graphics {
             }
         }
         let Some(session) = self.panes.get_mut(&pane) else { return false };
-        session.start_selection(row, col);
+        session.start_selection_of(row, col, kind);
         self.selecting = Some(pane);
         true
     }
@@ -1137,12 +1172,19 @@ impl Graphics {
         }
     }
 
-    /// Reads the system clipboard and writes it straight to `pane`'s shell,
-    /// as if typed — the terminal context menu's "Paste". A plain paste,
-    /// not bracketed-paste-escaped: v1 scope matches most simple terminal
-    /// emulators' default paste behavior, not iTerm2/kitty's opt-in
-    /// bracketed paste mode that guards against pasted text executing as
-    /// commands on its own newlines.
+    /// Whether `pane`'s running program has asked for bracketed paste. See
+    /// `crate::paste` for what that changes.
+    fn pane_wants_bracketed_paste(&self, pane: PaneId) -> bool {
+        self.panes
+            .get(&pane)
+            .map(|session| session.screen().wants_bracketed_paste())
+            .unwrap_or(false)
+    }
+
+    /// Pastes the system clipboard into `pane`. Sends immediately when
+    /// that's safe; otherwise opens a confirmation prompt and sends only
+    /// once the user agrees (see `crate::paste::needs_confirmation` for
+    /// what counts as risky, and `confirm_paste` for the other half).
     pub fn paste_into_pane(&mut self, pane: PaneId) {
         let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
             Ok(text) => text,
@@ -1151,8 +1193,22 @@ impl Graphics {
                 return;
             }
         };
+        let bracketed = self.pane_wants_bracketed_paste(pane);
+        if self.settings.general.confirm_multiline_paste && crate::paste::needs_confirmation(&text, bracketed) {
+            self.ui.open_paste_confirm(pane, text);
+            return;
+        }
+        self.write_paste(pane, &text);
+    }
+
+    /// Sends `text` to `pane` as a paste, bracketing it if the running
+    /// program asked for that. The single place paste bytes reach a PTY —
+    /// both the immediate path and the post-confirmation one go through
+    /// here, so the bracketing rule can't be applied inconsistently.
+    pub fn write_paste(&mut self, pane: PaneId, text: &str) {
+        let bytes = crate::paste::encode(text, self.pane_wants_bracketed_paste(pane));
         if let Some(session) = self.panes.get_mut(&pane)
-            && let Err(err) = session.write_input(text.as_bytes())
+            && let Err(err) = session.write_input(&bytes)
         {
             eprintln!("failed to write pasted input to pane: {err:#}");
         }
@@ -1449,6 +1505,9 @@ impl Graphics {
             self.apply_settings(new_config.clone());
             self.saved_settings = new_config;
         }
+        if let Some((pane, text)) = ui_request.confirm_paste {
+            self.write_paste(pane, &text);
+        }
         if ui_request.settings_cancelled {
             self.apply_settings(self.saved_settings.clone());
         }
@@ -1687,4 +1746,5 @@ mod tests {
     fn contrast_still_picks_light_text_for_a_genuinely_dark_color() {
         assert_eq!(contrasting_text_color(TITLE_BAR_BG), TITLE_BAR_TEXT_LIGHT);
     }
+
 }

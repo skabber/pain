@@ -135,8 +135,10 @@ impl PaneSession {
     }
 
     /// Starts a fresh in-grid text selection at 0-indexed (row, col).
-    pub fn start_selection(&mut self, row: usize, col: usize) {
-        self.screen.start_selection(row, col);
+    /// Starts a selection of the given granularity — see
+    /// `pane::Screen::start_selection_of`.
+    pub fn start_selection_of(&mut self, row: usize, col: usize, kind: pane::SelectionKind) {
+        self.screen.start_selection_of(row, col, kind);
     }
 
     /// Extends the in-progress selection (if any) to 0-indexed (row, col).

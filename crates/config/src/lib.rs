@@ -37,11 +37,17 @@ pub struct General {
     /// in a hand-edited file round-trips the same way as an absent key.
     pub default_shell: String,
     pub scrollback_lines: usize,
+    /// Ask before pasting text that would run more than one command in a
+    /// program that hasn't enabled bracketed paste. On by default: without
+    /// bracketing, every newline in a paste executes the moment it
+    /// arrives, so an unreviewed multi-line paste runs arbitrary commands
+    /// with no chance to look at them first.
+    pub confirm_multiline_paste: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
-        General { default_shell: String::new(), scrollback_lines: 5000 }
+        General { default_shell: String::new(), scrollback_lines: 5000, confirm_multiline_paste: true }
     }
 }
 

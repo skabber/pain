@@ -5,9 +5,11 @@ mod foreground_process;
 mod graphics;
 mod mouse;
 mod pane_session;
+mod paste;
 mod platform;
 mod session_cwd;
 mod ui;
+mod url;
 mod verbose;
 
 use std::sync::Arc;
@@ -155,6 +157,48 @@ struct App {
     graphics: Option<Graphics>,
     modifiers: ModifiersState,
     cursor_pos: (f32, f32),
+    /// When and where the last left-press landed, and what click number it
+    /// was — see `next_click_count`.
+    last_click: Option<(std::time::Instant, (f32, f32), u32)>,
+}
+
+/// How close together in time two presses must be to count as a
+/// double/triple click. 400ms is the long-standing common default across
+/// desktop platforms; winit doesn't report click counts itself, so this
+/// has to be derived here.
+const MULTI_CLICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+/// How far the pointer may drift between presses and still count as the
+/// same multi-click. A few pixels of slop, because nobody holds a mouse
+/// perfectly still — but small enough that two deliberate clicks on
+/// different cells never merge.
+const MULTI_CLICK_SLOP_PX: f32 = 4.0;
+
+/// Returns 1, 2, or 3 for a single, double, or triple click, cycling back
+/// to 1 after a triple so a fourth click starts a fresh character
+/// selection rather than staying stuck on whole lines.
+///
+/// A free function over just the click-tracking state rather than a
+/// method on `App`: the caller already holds a `&mut` borrow of
+/// `self.graphics` when it needs this, and taking `&mut self` here would
+/// conflict with it. `now` is a parameter so the cycling rules are
+/// testable without waiting on a real clock.
+fn next_click_count(
+    last: &mut Option<(std::time::Instant, (f32, f32), u32)>,
+    pos: (f32, f32),
+    now: std::time::Instant,
+) -> u32 {
+    let count = match *last {
+        Some((at, last_pos, count))
+            if now.duration_since(at) <= MULTI_CLICK_INTERVAL
+                && (last_pos.0 - pos.0).abs() <= MULTI_CLICK_SLOP_PX
+                && (last_pos.1 - pos.1).abs() <= MULTI_CLICK_SLOP_PX =>
+        {
+            count % 3 + 1
+        }
+        _ => 1,
+    };
+    *last = Some((now, pos, count));
+    count
 }
 
 impl ApplicationHandler for App {
@@ -354,6 +398,19 @@ impl ApplicationHandler for App {
                             // since it's drawn on top of everything else in
                             // the title bar and a click there should never
                             // also start a drag or change focus.
+                            // Ctrl+click opens a link rather than
+                            // starting a selection — the same convention
+                            // as VS Code's terminal and Windows Terminal.
+                            // Plain click is left alone precisely because
+                            // it already means "select", and silently
+                            // launching a browser mid-drag would be a
+                            // nasty surprise.
+                            if modifiers.ctrl
+                                && let Some(url) = graphics.url_at(self.cursor_pos)
+                            {
+                                Graphics::open_url(&url);
+                                return;
+                            }
                             if let Some(pane) = graphics.close_button_at(self.cursor_pos) {
                                 if !graphics.close_pane(pane) {
                                     graphics.save_session();
@@ -380,7 +437,19 @@ impl ApplicationHandler for App {
                                 let focus_changed = graphics.focus_at(self.cursor_pos);
                                 let reported = !modifiers.shift
                                     && graphics.mouse_press(self.cursor_pos, mouse::Button::Left, modifiers);
-                                let selecting = !reported && graphics.start_selection(self.cursor_pos);
+                                // Click count only matters for local
+                                // selection — a program doing its own
+                                // mouse reporting gets every press
+                                // forwarded and decides for itself what a
+                                // double click means.
+                                let clicks =
+                                    next_click_count(&mut self.last_click, self.cursor_pos, std::time::Instant::now());
+                                let kind = match clicks {
+                                    2 => pane::SelectionKind::Word,
+                                    3 => pane::SelectionKind::Line,
+                                    _ => pane::SelectionKind::Character,
+                                };
+                                let selecting = !reported && graphics.start_selection_of(self.cursor_pos, kind);
                                 if focus_changed || reported || selecting {
                                     graphics.window().request_redraw();
                                 }
@@ -558,6 +627,37 @@ mod tests {
     /// ship with no window icon at all and nothing would say so. This
     /// caught exactly that once already: ImageMagick emits 16-bit PNGs by
     /// default, which the 8-bit RGBA requirement rejects.
+    /// The cycling rule specifically: a fourth rapid click has to drop
+    /// back to a character selection rather than staying latched on whole
+    /// lines, which is what every other terminal does.
+    #[test]
+    fn rapid_clicks_cycle_single_double_triple_then_back_to_single() {
+        let mut last = None;
+        let now = std::time::Instant::now();
+        let pos = (10.0, 10.0);
+        let counts: Vec<u32> = (0..4).map(|_| next_click_count(&mut last, pos, now)).collect();
+        assert_eq!(counts, vec![1, 2, 3, 1]);
+    }
+
+    #[test]
+    fn a_slow_second_click_starts_over() {
+        let mut last = None;
+        let start = std::time::Instant::now();
+        let pos = (10.0, 10.0);
+        assert_eq!(next_click_count(&mut last, pos, start), 1);
+        let much_later = start + MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1);
+        assert_eq!(next_click_count(&mut last, pos, much_later), 1);
+    }
+
+    #[test]
+    fn a_second_click_far_away_starts_over() {
+        let mut last = None;
+        let now = std::time::Instant::now();
+        assert_eq!(next_click_count(&mut last, (10.0, 10.0), now), 1);
+        // Well beyond the slop allowance — a deliberate click elsewhere.
+        assert_eq!(next_click_count(&mut last, (200.0, 10.0), now), 1);
+    }
+
     #[test]
     fn embedded_window_icon_actually_decodes() {
         assert!(window_icon().is_some(), "the embedded icon asset must decode to 8-bit RGBA");

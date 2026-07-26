@@ -12,7 +12,7 @@ pub use alacritty_terminal::selection::SelectionRange;
 pub use alacritty_terminal::term::TermMode;
 pub use alacritty_terminal::term::cell::Flags;
 pub use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
-pub use term::{RenderCell, Screen};
+pub use term::{RenderCell, Screen, SelectionKind};
 
 /// Terminal dimensions, in character cells.
 #[derive(Clone, Copy, Debug)]

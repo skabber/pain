@@ -3771,3 +3771,49 @@
   all and the shader needs a per-platform output path — but the reasoning
   above says premultiplied should be correct. Uncommitted, alongside the
   paste-safety/selection/URL work from the previous session.
+
+  **Update — same session, continued:** v1.3.0 shipped clean (all 7 jobs
+  green), then the developer tested the paste dialog on real hardware and
+  reported two things.
+
+  **1. Huge dead space above the dialog's buttons.** Checked the two
+  suspects rather than guessing: `ScrollArea`'s `auto_shrink` defaults to
+  `TRUE` (so it wasn't over-reserving), which left
+  `with_layout(right_to_left(Align::Center))` as the cause — it claims
+  all remaining vertical space of an auto-sizing window and centres the
+  buttons within it, so `min_rect` spans from the region's top through
+  the buttons. Fixed with a new `action_row` helper that allocates an
+  explicit one-row-high region via `allocate_ui_with_layout` (the same
+  technique `grid_label` already uses for its fixed-width cells).
+  **The settings panel had the identical latent bug** — visible in an
+  earlier screenshot this session, never reported — so it was fixed in
+  the same pass rather than left to be re-reported later.
+
+  **2. No hover feedback for Ctrl+click links.** Fair — the affordance
+  was invisible until you clicked. Added:
+  - `url::match_at_column` returning the whole `Match` (not just the URL
+    text) so callers know which columns to underline.
+  - `Graphics::hovered_url: Option<UrlHover>` plus `update_url_hover`,
+    which returns whether the highlight *changed* so the caller only
+    forces a redraw when something needs repainting.
+  - Recomputed on `ModifiersChanged` as well as `CursorMoved` —
+    otherwise pressing or releasing Ctrl without moving the mouse
+    wouldn't light up (or clear) the link under it, which is exactly the
+    gesture people use.
+  - An accent-colored underline drawn under the URL's own columns in
+    `redraw`, and `CursorIcon::Pointer` while hovering — deliberately
+    taking priority over the divider resize cursor, since a click there
+    acts on the link.
+
+  Removed the now-dead `url::at_column` (superseded by
+  `match_at_column`) rather than leaving unused public API; its tests now
+  exercise `match_at_column` through a small test-only helper. Caught one
+  self-inflicted slip in the process: a `sed` left a stray `#[test]` on
+  that helper, which `cargo build` happily ignored because it doesn't
+  compile test code — only `cargo test` would have failed. Worth
+  remembering that `cargo build` passing says nothing about test-code
+  validity.
+
+  Workspace build/clippy/test clean (57 app-crate tests), Windows
+  cross-target clippy clean, smoke launch no panics. Uncommitted — this
+  is post-v1.3.0 work awaiting the next release.

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v1.4.0
+
+- Holding `Ctrl` now underlines the URL under the pointer and switches to
+  a hand cursor, so it's clear what a `Ctrl+click` will open before you
+  click it.
+- Fixed: the paste confirmation dialog (and the settings panel) left a
+  large empty gap above their buttons, making both windows much taller
+  than their content.
+
 ## v1.3.0
 
 - Paste is now safe by default. Text is wrapped in bracketed-paste markers

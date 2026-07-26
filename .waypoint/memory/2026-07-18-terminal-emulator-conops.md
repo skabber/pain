@@ -3817,3 +3817,31 @@
   Workspace build/clippy/test clean (57 app-crate tests), Windows
   cross-target clippy clean, smoke launch no panics. Uncommitted — this
   is post-v1.3.0 work awaiting the next release.
+
+  **Update — same session, continued:** Developer confirmed the hover
+  highlighting and dialog spacing both tested good, and asked to wrap up
+  and release. Cut **v1.4.0** (minor — URL hover is an additive
+  capability; the spacing fix is a bug fix).
+
+  Three commits, and this time the split fell cleanly along file
+  boundaries (hover entirely in `graphics.rs`/`main.rs`/`url.rs`, spacing
+  entirely in `ui.rs`) so no hunk surgery was needed — but the spacing
+  fix was still held aside and commit 1's tree verified to build and pass
+  the full suite standalone, same discipline as the v1.3.0 split.
+
+  All 7 jobs green. Verified the published result rather than trusting
+  checkmarks: correct four assets attached, notes 325 bytes of real
+  content, and `curl`'d the live APT `Packages` file — it lists
+  **1.1.0, 1.2.0, 1.3.0, and 1.4.0** side by side, confirming the pool
+  genuinely accumulates across releases. That was the whole reason for
+  choosing a persistent `gh-pages` branch over artifact-based Pages
+  deployment, and it's now demonstrably working, not just intended.
+
+  Also brought `.waypoint/project.md`'s status header current — it was
+  badly stale (still described "pain" as a placeholder for an undecided
+  product name and the project as mid-milestone). It now records: all v1
+  milestones done, v1.0.0-v1.4.0 shipped, the name settled, the full
+  automated distribution story, per-platform verification status
+  (including that macOS now has a real tester and the transparency fix
+  was confirmed there), and the deferred list (scrollback search, named
+  layouts, arm64 Windows/Linux, shader effects, WSL cwd tracking).

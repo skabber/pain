@@ -1,15 +1,37 @@
 # Project state
 
-**Phase:** Execution — working through `.waypoint/plan/v1-build-plan.md`.
-Milestones 0-6 (scaffolding, single pane, splits/layout tree, input routing +
-grouping, mouse, chrome + config, transparency) are complete and confirmed
-working interactively by the developer on both Linux and Windows, including
-numerous real bugs found via hands-on testing and fixed (see memory log —
-Milestone 6/Windows transparency alone took four rounds: a wrong swapchain
-target, an upstream `wgpu-hal` bug, a wrong alpha-blend convention, and a
-`winit` window-creation flag). Working name "pain" (from this repo's own
-directory) is standing in for the still-undecided product name, used for the config
-directory and nowhere else yet.
+**Phase:** Released and iterating. All of `.waypoint/plan/v1-build-plan.md`'s
+milestones are done, and the project has shipped **v1.0.0 through v1.4.0**
+publicly from `github.com/w-p/pain`.
+
+The product name is settled: **pain**. It's the crate, the binary, the
+config directory, and the published package name — no longer a placeholder.
+
+**Distribution is fully automated.** Pushing a `v*` tag runs
+`.github/workflows/release.yml`, which builds four targets, publishes a
+GitHub Release with notes taken verbatim from `CHANGELOG.md`'s matching
+section, and updates a GPG-signed APT repository on the `gh-pages` branch.
+Users get: a Linux tarball, a `.deb`, `apt install`/`apt upgrade` via the
+hosted repo, a Windows zip, and a universal macOS `.app` (Intel + Apple
+Silicon in one download). Cutting a release is driven by
+`.waypoint/skills/version-bump.md`, which decides the semver bump from what
+changed, confirms the version and commit message, then commits, tags, and
+pushes.
+
+**Verification status by platform:** Linux and Windows are exercised
+continuously in development. macOS is now covered by a real tester — the
+v1.3.0 transparency fix (Metal only ever offers a `PostMultiplied`
+composite mode, which the surface setup didn't accept, leaving every Mac
+opaque) was confirmed working there. Binaries are unsigned on both macOS
+and Windows, so Gatekeeper/SmartScreen warn on first launch; the README
+documents the `xattr` workaround. Code signing needs paid certificates and
+is a spend decision, not a code one.
+
+**Known deferred items:** scrollback search, named/saved layouts (judged
+niche), arm64 Windows/Linux build targets, shader effects and animated
+backgrounds (declined as fluff), and the long-standing WSL cwd-tracking
+gap. Rendering is a single direct-to-swapchain pass with no offscreen
+target, so any post-processing would need that refactor first.
 
 Between Milestone 6 and Milestone 7, the developer requested an out-of-plan
 feature — pane title bars, colored/named groups, and related chrome — not

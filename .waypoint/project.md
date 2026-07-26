@@ -24,8 +24,17 @@ v1.3.0 transparency fix (Metal only ever offers a `PostMultiplied`
 composite mode, which the surface setup didn't accept, leaving every Mac
 opaque) was confirmed working there. Binaries are unsigned on both macOS
 and Windows, so Gatekeeper/SmartScreen warn on first launch; the README
-documents the `xattr` workaround. Code signing needs paid certificates and
-is a spend decision, not a code one.
+documents the `xattr` workaround.
+
+**Code signing: declined, decided 2026-07-26.** Priced out at ~$99/yr
+(Apple Developer Program, which fully clears Gatekeeper) plus ~$120/yr
+(Azure Artifact Signing, subject to geographic eligibility) or $215-685/yr
+for a traditional Windows cert — note that a plain OV cert does *not*
+immediately clear SmartScreen, since reputation accrues with download
+volume. Judged not worth the recurring cost for a free project at this
+scale. Don't re-raise this as an open question; revisit only if the
+developer asks or the unsigned warnings start demonstrably costing
+adoption.
 
 **Known deferred items:** scrollback search, named/saved layouts (judged
 niche), arm64 Windows/Linux build targets, shader effects and animated

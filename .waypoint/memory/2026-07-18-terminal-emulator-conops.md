@@ -3845,3 +3845,20 @@
   (including that macOS now has a real tester and the transparency fix
   was confirmed there), and the deferred list (scrollback search, named
   layouts, arm64 Windows/Linux, shader effects, WSL cwd tracking).
+
+  **Update — 2026-07-26:** Developer asked what code signing would cost.
+  Searched for current figures rather than answering from training data
+  (~6 months stale on commercial pricing, and this space has moved):
+  Apple Developer Program $99/yr with notarization included — fully
+  clears Gatekeeper; Windows is messier — Azure Artifact Signing
+  (renamed from Trusted Signing) ~$120/yr and CI-friendly but with
+  geographic eligibility limits, traditional OV $215-400/yr but
+  **doesn't** immediately clear SmartScreen (reputation accrues with
+  download volume), EV $280-685/yr for immediate reputation. Also noted
+  the post-2023 FIPS hardware-key requirement and the March 2026 drop to
+  ~460-day max validity.
+
+  **Developer declined — not worth it for now.** Recorded in
+  `project.md` as a settled decision rather than a lingering open
+  question, so future sessions don't re-raise it. Revisit only if asked
+  or if unsigned warnings start demonstrably costing adoption.

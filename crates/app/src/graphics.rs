@@ -234,9 +234,11 @@ impl Graphics {
         // the same as the WSLg cursor-theme quirks already documented in
         // project memory: not chased, just not attempted.
         let caps = surface.get_capabilities(&adapter);
-        if !platform::is_wsl() && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
-        } else if crate::verbose::is_verbose(crate::verbose::Category::General) {
+        config.alpha_mode =
+            preferred_alpha_mode(&caps.alpha_modes, platform::is_wsl(), cfg!(target_os = "macos"));
+        if config.alpha_mode == wgpu::CompositeAlphaMode::Opaque
+            && crate::verbose::is_verbose(crate::verbose::Category::General)
+        {
             eprintln!(
                 "wgpu: transparency unavailable here (offers {:?}, wsl={}); window transparency will have no visible effect",
                 caps.alpha_modes,
@@ -1542,6 +1544,50 @@ impl Graphics {
     }
 }
 
+/// Picks the swapchain's composite-alpha mode — the thing that decides
+/// whether the window can be see-through at all.
+///
+/// `PreMultiplied` is the preference everywhere it's offered: it's what
+/// the grid shader actually emits (see `shader.wgsl`), and on Windows
+/// it's the *only* mode DirectComposition accepts.
+///
+/// macOS needs a special case. The Metal backend advertises only
+/// `[Opaque, PostMultiplied]` — it never offers `PreMultiplied`, so the
+/// preference above alone left every Mac fully opaque with transparency
+/// silently doing nothing (the bug this function was extracted to fix).
+/// Accepting `PostMultiplied` there is safe despite the shader emitting
+/// premultiplied content, because on Metal that mode is a misnomer:
+/// wgpu-hal's entire implementation of it is `setOpaque(false)` on the
+/// `CAMetalLayer`, with no format or blend change. Core Animation then
+/// composites the layer by its own convention, which *is* premultiplied.
+///
+/// That reasoning is Metal-specific, which is why this isn't just "accept
+/// any non-opaque mode": on Vulkan, `POST_MULTIPLIED` means what it says —
+/// the compositor multiplies by alpha — so feeding it our premultiplied
+/// output would double-darken every translucent pixel. Better to stay
+/// opaque on such a surface than to render visibly wrong colors.
+///
+/// WSL is excluded outright rather than left to fall back naturally:
+/// WSLg reports `PreMultiplied` as available but doesn't composite it
+/// correctly — observed as the whole window going see-through regardless
+/// of the configured level, with mouse clicks passing through it.
+fn preferred_alpha_mode(
+    available: &[wgpu::CompositeAlphaMode],
+    is_wsl: bool,
+    allow_post_multiplied: bool,
+) -> wgpu::CompositeAlphaMode {
+    if is_wsl {
+        return wgpu::CompositeAlphaMode::Opaque;
+    }
+    if available.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        return wgpu::CompositeAlphaMode::PreMultiplied;
+    }
+    if allow_post_multiplied && available.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        return wgpu::CompositeAlphaMode::PostMultiplied;
+    }
+    wgpu::CompositeAlphaMode::Opaque
+}
+
 /// Starts watching `config_path`'s parent directory (not the file itself —
 /// an editor that saves via temp-file-plus-rename can otherwise orphan a
 /// watch on the file's original inode) for changes, reporting each one on
@@ -1747,4 +1793,40 @@ mod tests {
         assert_eq!(contrasting_text_color(TITLE_BAR_BG), TITLE_BAR_TEXT_LIGHT);
     }
 
+    use wgpu::CompositeAlphaMode::{Opaque, PostMultiplied, PreMultiplied};
+
+    #[test]
+    fn premultiplied_is_preferred_wherever_it_is_offered() {
+        // Windows/DirectComposition depends on this specifically.
+        assert_eq!(preferred_alpha_mode(&[Opaque, PreMultiplied], false, false), PreMultiplied);
+        assert_eq!(preferred_alpha_mode(&[Opaque, PreMultiplied, PostMultiplied], false, true), PreMultiplied);
+    }
+
+    #[test]
+    fn macos_falls_back_to_post_multiplied() {
+        // The reported bug: Metal advertises exactly this set, so without
+        // the fallback every Mac stayed opaque and transparency silently
+        // did nothing.
+        let metal_offers = [Opaque, PostMultiplied];
+        assert_eq!(preferred_alpha_mode(&metal_offers, false, true), PostMultiplied);
+    }
+
+    #[test]
+    fn other_backends_stay_opaque_rather_than_render_wrong_colors() {
+        // Same advertised set, but off macOS `PostMultiplied` genuinely
+        // means "the compositor multiplies by alpha" — handing it our
+        // premultiplied output would double-darken every translucent
+        // pixel, so staying opaque is the better failure.
+        assert_eq!(preferred_alpha_mode(&[Opaque, PostMultiplied], false, false), Opaque);
+    }
+
+    #[test]
+    fn wsl_stays_opaque_even_when_premultiplied_is_advertised() {
+        assert_eq!(preferred_alpha_mode(&[Opaque, PreMultiplied], true, false), Opaque);
+    }
+
+    #[test]
+    fn an_opaque_only_surface_stays_opaque() {
+        assert_eq!(preferred_alpha_mode(&[Opaque], false, true), Opaque);
+    }
 }

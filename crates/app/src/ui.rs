@@ -563,7 +563,7 @@ impl Ui {
                             );
                         });
                         ui.separator();
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        action_row(ui, |ui| {
                             if ui.button("Paste anyway").clicked() {
                                 request.confirm_paste = Some((*pane, text.clone()));
                                 paste_confirm_handled = true;
@@ -780,7 +780,7 @@ impl Ui {
                     // added under `right_to_left` lands rightmost, so Save
                     // is added first here despite reading second on
                     // screen.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    action_row(ui, |ui| {
                         if ui.button("Save").clicked() {
                             let new_config = draft.apply_to(settings);
                             if let Err(err) = new_config.save(&config::Config::default_path()) {
@@ -941,6 +941,24 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
     ui.label(egui::RichText::new(text.to_uppercase()).monospace().size(9.5).color(MUTED).extra_letter_spacing(1.0));
     ui.add_space(4.0);
+}
+
+/// A right-aligned row of action buttons, explicitly bounded to a single
+/// row's height.
+///
+/// `with_layout(right_to_left(..))` on its own claims all the remaining
+/// vertical space of an auto-sizing window and centres the buttons within
+/// it, which leaves a large dead gap above them and makes the window far
+/// taller than its content — visible in a real screenshot of the paste
+/// dialog. Allocating an explicit one-row region instead pins the height
+/// to what the buttons actually need.
+fn action_row(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        add_contents,
+    );
 }
 
 /// A settings-grid label pinned to `width`, instead of shrinking to fit

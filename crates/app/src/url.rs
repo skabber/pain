@@ -73,10 +73,12 @@ fn starts_with_at(haystack: &[char], at: usize, needle: &str) -> bool {
     haystack[at..at + needle.len()] == needle[..]
 }
 
-/// The URL at character index `col` in `line`, if any — what a click on a
-/// given grid column resolves to.
-pub fn at_column(line: &str, col: usize) -> Option<String> {
-    find(line).into_iter().find(|m| col >= m.start && col < m.end).map(|m| m.url)
+/// The URL match at character index `col` in `line`, if any — what a
+/// click or hover on a given grid column resolves to. Returns the whole
+/// match rather than just the text so callers can underline the exact
+/// columns it occupies.
+pub fn match_at_column(line: &str, col: usize) -> Option<Match> {
+    find(line).into_iter().find(|m| col >= m.start && col < m.end)
 }
 
 #[cfg(test)]
@@ -127,15 +129,21 @@ mod tests {
         assert_eq!(m[0].url, "HTTPS://Example.COM/Path");
     }
 
+    /// Test-only convenience: the URL text at a column, which is what
+    /// most of these assertions care about.
+    fn url_at(line: &str, col: usize) -> Option<String> {
+        match_at_column(line, col).map(|m| m.url)
+    }
+
     #[test]
-    fn at_column_resolves_only_inside_the_url() {
+    fn match_at_column_resolves_only_inside_the_url() {
         // "x " occupies columns 0-1, so the 19-character URL spans 2..21.
         let line = "x https://example.com y";
-        assert_eq!(at_column(line, 0), None, "before the url");
-        assert_eq!(at_column(line, 2).as_deref(), Some("https://example.com"), "first url char");
-        assert_eq!(at_column(line, 20).as_deref(), Some("https://example.com"), "last url char");
-        assert_eq!(at_column(line, 21), None, "the space after the url");
-        assert_eq!(at_column(line, 22), None, "past the url");
+        assert_eq!(url_at(line, 0), None, "before the url");
+        assert_eq!(url_at(line, 2).as_deref(), Some("https://example.com"), "first url char");
+        assert_eq!(url_at(line, 20).as_deref(), Some("https://example.com"), "last url char");
+        assert_eq!(url_at(line, 21), None, "the space after the url");
+        assert_eq!(url_at(line, 22), None, "past the url");
     }
 
     #[test]
@@ -146,6 +154,6 @@ mod tests {
         let line = "→→ https://example.com";
         let m = &find(line)[0];
         assert_eq!(m.start, 3);
-        assert_eq!(at_column(line, 3).as_deref(), Some("https://example.com"));
+        assert_eq!(url_at(line, 3).as_deref(), Some("https://example.com"));
     }
 }

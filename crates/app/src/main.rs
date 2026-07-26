@@ -325,6 +325,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // Pressing or releasing Ctrl changes whether the link
+                // under the (stationary) pointer is activatable, so the
+                // highlight has to be recomputed here too — not just on
+                // movement.
+                if graphics.update_url_hover(self.cursor_pos, self.modifiers.control_key()) {
+                    graphics.window().request_redraw();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } if !ui_consumed => {
                 let chord_result =
@@ -367,10 +374,20 @@ impl ApplicationHandler for App {
                         graphics.update_selection(pos);
                         graphics.window().request_redraw();
                     } else {
-                        let icon = match graphics.divider_orientation_at(pos) {
-                            Some(Orientation::Horizontal) => CursorIcon::EwResize,
-                            Some(Orientation::Vertical) => CursorIcon::NsResize,
-                            None => CursorIcon::Default,
+                        if graphics.update_url_hover(pos, self.modifiers.control_key()) {
+                            graphics.window().request_redraw();
+                        }
+                        // A hoverable link wins over the divider cursor:
+                        // if the pointer is on a link, that's what a
+                        // click will act on.
+                        let icon = if graphics.is_hovering_url() {
+                            CursorIcon::Pointer
+                        } else {
+                            match graphics.divider_orientation_at(pos) {
+                                Some(Orientation::Horizontal) => CursorIcon::EwResize,
+                                Some(Orientation::Vertical) => CursorIcon::NsResize,
+                                None => CursorIcon::Default,
+                            }
                         };
                         graphics.window().set_cursor(icon);
                     }

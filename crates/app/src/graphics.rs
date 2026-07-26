@@ -26,6 +26,17 @@ const DIVIDER_COLOR: [f32; 4] = [0.149, 0.169, 0.192, 1.0];
 /// needs `contrasting_text_color` instead, since it might not be).
 const TEXT_COLOR: [f32; 4] = [0.875, 0.886, 0.902, 1.0];
 
+/// A URL under the pointer: where to draw its underline, and what to open
+/// if it's clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UrlHover {
+    pane: PaneId,
+    row: usize,
+    start_col: usize,
+    end_col: usize,
+    url: String,
+}
+
 /// Drops `TEXT_COLOR`'s alpha channel, for use as a per-cell default color
 /// (`color::resolve`'s API works in bare RGB — alpha is always opaque for
 /// grid text, so there's nothing meaningful for a fourth channel to say).
@@ -125,6 +136,12 @@ pub struct Graphics {
     /// pane whose program hasn't turned on mouse reporting gets a local
     /// selection instead of a forwarded click.
     selecting: Option<PaneId>,
+    /// The URL currently under the pointer while Ctrl is held, if any —
+    /// drives both the underline drawn in `redraw` and the hand cursor.
+    /// Recomputed on pointer movement *and* on modifier changes, so
+    /// holding Ctrl without moving the mouse still lights up the link
+    /// under it.
+    hovered_url: Option<UrlHover>,
     ui: crate::ui::Ui,
     /// The user's config — loaded once here for now; Milestone 5.2 (hot
     /// reload) replaces this wholesale on a valid re-parse, and 5.3/5.4
@@ -353,6 +370,7 @@ impl Graphics {
             dragging: None,
             mouse_gesture: None,
             selecting: None,
+            hovered_url: None,
             ui,
             settings,
             saved_settings,
@@ -1010,12 +1028,35 @@ impl Graphics {
     /// is on screen right now including scrolled-back history — there's
     /// no separate index of links to keep in sync.
     pub fn url_at(&self, pos: (f32, f32)) -> Option<String> {
+        self.url_hover_at(pos).map(|h| h.url)
+    }
+
+    fn url_hover_at(&self, pos: (f32, f32)) -> Option<UrlHover> {
         let pane = self.pane_at(pos)?;
         let (col, row) = self.cell_at(pane, pos)?;
         let session = self.panes.get(&pane)?;
         let cells = session.screen().visible_cells();
         let line: String = cells.get(row)?.iter().map(|c| c.c).collect();
-        crate::url::at_column(&line, col)
+        let m = crate::url::match_at_column(&line, col)?;
+        Some(UrlHover { pane, row, start_col: m.start, end_col: m.end, url: m.url })
+    }
+
+    /// Recomputes which link (if any) is under `pos`. `ctrl_held` gates it
+    /// because Ctrl+click is what actually opens a link — highlighting one
+    /// the user can't currently activate would just be misleading.
+    /// Returns whether the highlight changed, so the caller only forces a
+    /// redraw when something actually needs repainting.
+    pub fn update_url_hover(&mut self, pos: (f32, f32), ctrl_held: bool) -> bool {
+        let next = if ctrl_held { self.url_hover_at(pos) } else { None };
+        let changed = next != self.hovered_url;
+        self.hovered_url = next;
+        changed
+    }
+
+    /// Whether a link is currently highlighted — the caller uses this to
+    /// switch the pointer to a hand.
+    pub fn is_hovering_url(&self) -> bool {
+        self.hovered_url.is_some()
     }
 
     /// Opens `url` with whatever the OS considers the right handler.
@@ -1298,6 +1339,7 @@ impl Graphics {
         // category the accent color exists to theme.
         let accent_rgb = self.settings.appearance.accent_rgb();
         let cursor_color = [accent_rgb[0], accent_rgb[1], accent_rgb[2], 0.5];
+        let accent_color = [accent_rgb[0], accent_rgb[1], accent_rgb[2], 1.0];
         let selection_color = [accent_rgb[0], accent_rgb[1], accent_rgb[2], 0.45];
 
         let mut rects: Vec<render::SolidRect> = geometry
@@ -1324,6 +1366,7 @@ impl Graphics {
 
         let panes = &self.panes;
         let router = &self.router;
+        let hovered_url = self.hovered_url.as_ref();
         let foreground_processes = &self.foreground_processes;
         let glyphs: Vec<render::GlyphCell> = geometry
             .panes
@@ -1413,6 +1456,21 @@ impl Graphics {
                 if let Some(range) = screen.selection_range() {
                     let cols = (origin.width / cell.0) as usize;
                     push_selection(&mut rects, origin, cell, range, cols, selection_color);
+                }
+
+                // Ctrl-held link highlight: a rule under the URL's own
+                // columns, in the accent color, so it reads as
+                // "activatable right now" the same way the cursor and
+                // selection do.
+                if let Some(hover) = hovered_url.filter(|h| h.pane == pane_rect.pane) {
+                    let thickness = (cell.1 * 0.08).max(1.0).round();
+                    rects.push(render::SolidRect {
+                        x: origin.x + hover.start_col as f32 * cell.0,
+                        y: origin.y + (hover.row + 1) as f32 * cell.1 - thickness,
+                        width: (hover.end_col - hover.start_col) as f32 * cell.0,
+                        height: thickness,
+                        color: accent_color,
+                    });
                 }
 
                 for (row, row_cells) in cells.into_iter().enumerate() {

@@ -3932,3 +3932,24 @@
   Workspace build/clippy/test clean (36 pane tests), Windows cross-target
   clippy clean. Uncommitted alongside the `.app` ad-hoc signing and the
   README launch-instructions fix.
+
+  **Update — 2026-07-26:** Shipped **v1.4.1** (patch — all fixes). Two
+  commits at the developer's preference (grouped fixes, then the bump)
+  rather than the four I proposed.
+
+  All 7 jobs green, including `macos-bundle` running `codesign` for the
+  first time. Verified the published artifact rather than the
+  checkmarks: `Contents/_CodeSignature/CodeResources` **is now present**
+  (absent in v1.4.0 — that was the defect), and both slices survive
+  signing intact (x86_64 15.7 MB, arm64 14.4 MB, each carrying
+  `LC_CODE_SIGNATURE`). Release has the right four assets, notes at 980
+  bytes, and the APT pool is up to 5 versions with 1.4.1-1 newest.
+
+  Verification note: the first architecture check printed nonsense
+  (`0x3`, `0x0`) and briefly looked like signing had corrupted the
+  binary. **It was my parsing script, not the artifact** — I
+  mis-destructured `fat_arch` (cputype, cpusubtype, offset, size, align)
+  by one field, having written it correctly in an earlier session and
+  wrong this time. Re-ran it properly before reporting anything. Worth
+  remembering: when a verification script disagrees with a build that
+  passed its own in-CI assertions, suspect the script first.

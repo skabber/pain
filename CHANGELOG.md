@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v1.4.1
+
+- Fixed: shells were never told what terminal they were running in — `TERM`
+  was left to whatever the app process happened to inherit. Launched from a
+  desktop launcher (Finder, the Dock, a Linux applications menu) there is
+  usually no `TERM` at all, which degrades the shell: in zsh it disables the
+  line editor, so Backspace and other ordinary keys stop working. Shells now
+  get `TERM=xterm-256color` and `COLORTERM=truecolor`.
+- The macOS `.app` is now ad-hoc code-signed, so the bundle carries a
+  proper seal covering its `Info.plist` and resources. This isn't a real
+  developer-signed build — Gatekeeper still needs the quarantine flag
+  cleared — but the bundle is no longer unsealed.
+- README: documented how to actually launch `pain.app` from a terminal.
+  A `.app` is a directory, so `./pain.app` fails with "permission denied"
+  (zsh) or "Is a directory" (bash); use `open pain.app`, or run
+  `./pain.app/Contents/MacOS/pain` directly to see log output.
+
 ## v1.4.0
 
 - Holding `Ctrl` now underlines the URL under the pointer and switches to

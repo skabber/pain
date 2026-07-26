@@ -3862,3 +3862,73 @@
   `project.md` as a settled decision rather than a lingering open
   question, so future sessions don't re-raise it. Revisit only if asked
   or if unsigned warnings start demonstrably costing adoption.
+
+  **Update — 2026-07-26:** Mac tester reported "permission denied after
+  running xattr", said it worked in v1.0.0. **Not a bug.** Asked for the
+  exact commands rather than guessing (right call — my first two
+  hypotheses were both wrong).
+
+  He ran `./pain.app`. A `.app` is a *bundle*, i.e. a directory — you
+  can't execute it. zsh words that refusal as "permission denied"; bash
+  says "Is a directory" (verified locally). It "works fine in
+  /Applications" because there he double-clicks it instead. v1.0.0
+  genuinely worked differently: it shipped a **bare binary**, so `./pain`
+  was correct — the `.app` arrived in v1.2.0 and we never documented the
+  change in how you launch it.
+
+  Ruled out first, by inspecting the actual shipped artifacts rather
+  than theorizing: the exec bit *is* set (`-rwxr-xr-x` on
+  `Contents/MacOS/pain`), and the arm64 slice *does* carry
+  `LC_CODE_SIGNATURE` — so `lipo` had not stripped the linker's ad-hoc
+  signature, killing my initial hypothesis. Both were wrong guesses;
+  the exact command text is what actually solved it.
+
+  Fixed the real gap (documentation): README now explains that `.app` is
+  a directory, gives `open pain.app` and
+  `./pain.app/Contents/MacOS/pain` (the latter for seeing log output),
+  and notes why `xattr -dr` needs `-r`.
+
+  Separately found and fixed a genuine defect while investigating: the
+  bundle had **no seal** — no `Contents/_CodeSignature/CodeResources` —
+  because we never `codesign`'d it as a bundle, only the binary inside
+  carried the linker's signature. Added `codesign --force --sign -`
+  (ad-hoc, free, no certificate — orthogonal to the paid-signing
+  decision already declined) after the bundle contents are final and
+  before archiving, plus CI assertions that the seal exists and
+  `codesign --verify --strict` passes.
+
+  **Update — 2026-07-26:** Mac tester: Backspace not working in zsh.
+  Developer asked whether shell handling could differ ("seems unlikely").
+  It was a real and significant bug: **nothing ever set `TERM`.** Neither
+  this code nor `portable-pty` sets it, so the child shell inherited
+  whatever the GUI process had.
+
+  That explains the whole shape of the report. Launched from an existing
+  terminal, `TERM` is inherited and everything looks fine by accident —
+  which is how every prior test run happened. Launched from a desktop
+  launcher (Finder/Dock, or a Linux `.desktop` entry) there is usually
+  **no `TERM` at all**, and zsh responds by disabling/crippling ZLE, its
+  line editor — which surfaces as ordinary keys like Backspace doing
+  nothing. Not macOS-specific and not really zsh-specific either: it
+  would hit a Linux applications-menu launch identically; zsh is just
+  less forgiving of an unidentified terminal than bash.
+
+  Fix: `Pty::set_terminal_env` sets `TERM=xterm-256color` and
+  `COLORTERM=truecolor` at spawn. Chose `xterm-256color` over a bespoke
+  `pain` terminfo entry deliberately — a custom `TERM` only works where
+  its terminfo is installed, so it breaks the moment a user SSHes
+  somewhere that's never heard of this app.
+
+  Test-design note worth remembering: the first version spawned a real
+  `sh` and read `$TERM` back, and **failed for a reason that was the
+  test's fault** — the loop's exit condition matched the pty's *echo of
+  the typed command*, which contained the marker text. Fixed that, then
+  replaced the whole approach: proving the value wasn't merely inherited
+  required clearing `TERM` from the test process, and mutating
+  process-global env while the suite runs in parallel threads is a worse
+  hazard than the coverage was worth. Now asserts against
+  `CommandBuilder::get_env` directly — no spawn, no global state.
+
+  Workspace build/clippy/test clean (36 pane tests), Windows cross-target
+  clippy clean. Uncommitted alongside the `.app` ad-hoc signing and the
+  README launch-instructions fix.

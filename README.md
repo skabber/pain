@@ -14,8 +14,22 @@ See [CHANGELOG.md](CHANGELOG.md) for a detailed history.
 See [releases](../../releases) for binaries.
 
 macOS builds ship as a universal `pain.app` (Intel and Apple Silicon in one
-download) — drag it to Applications. The app isn't code-signed yet, so
-Gatekeeper will block the first launch; clear the quarantine flag once:
+download) — drag it to Applications and open it like any other app.
+
+`pain.app` is a bundle, which on disk is a *directory*, not a single
+executable file. Running `./pain.app` from a shell will fail with
+"permission denied" (zsh) or "Is a directory" (bash) — that's the shell
+refusing to execute a directory, not a problem with the download. To
+launch it from a terminal, use either:
+
+```sh
+open pain.app                    # hand it to macOS, same as double-clicking
+./pain.app/Contents/MacOS/pain   # run the binary directly, to see log output
+```
+
+The app isn't code-signed, so Gatekeeper blocks the first launch. Clear the
+quarantine flag once — note `-r`, since the flag is set on files inside the
+bundle too:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/pain.app

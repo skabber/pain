@@ -212,15 +212,28 @@ jobs:
           cp assets/pain-1024.png "$iconset/icon_512x512@2x.png"
           iconutil -c icns "$iconset" -o "$app/Contents/Resources/pain.icns"
 
+          # Ad-hoc sign the bundle (`-s -`, no certificate involved, free).
+          # The binary inside already carries the linker's own ad-hoc
+          # signature, but that says nothing about the *bundle* — without
+          # this step there's no `Contents/_CodeSignature/CodeResources`,
+          # so macOS sees an unsealed bundle whose Info.plist and
+          # resources aren't covered by anything. This does not replace
+          # real signing/notarization (deliberately not purchased — see
+          # `.waypoint/project.md`); users still clear quarantine by hand.
+          codesign --force --sign - "$app"
+
           # Prove the bundle is actually what it claims to be before it
-          # ships: both architectures present, and the plist readable by
-          # Apple's own parser with the version substituted.
+          # ships: both architectures present, the plist readable by
+          # Apple's own parser with the version substituted, and the
+          # bundle seal actually present and self-consistent.
           lipo -info "$app/Contents/MacOS/pain"
           lipo -archs "$app/Contents/MacOS/pain" | grep -q x86_64
           lipo -archs "$app/Contents/MacOS/pain" | grep -q arm64
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$version"
           test -s "$app/Contents/Resources/pain.icns"
+          test -f "$app/Contents/_CodeSignature/CodeResources"
+          codesign --verify --strict --verbose=2 "$app"
 
           mkdir -p dist
           tar -czf dist/pain-macos-universal.tar.gz "$app" LICENSE README.md

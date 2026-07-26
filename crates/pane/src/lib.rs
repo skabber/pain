@@ -81,6 +81,7 @@ impl Pty {
             (None, _) => CommandBuilder::new_default_prog(),
         };
         integration::apply(&mut cmd, family);
+        Self::set_terminal_env(&mut cmd);
         if let Some(cwd) = cwd {
             cmd.cwd(cwd);
         }
@@ -92,6 +93,29 @@ impl Pty {
             writer,
             child,
         })
+    }
+
+    /// Tells the child shell what kind of terminal it's talking to.
+    ///
+    /// Nothing set this before, so the shell simply inherited whatever
+    /// the GUI process happened to have. Launched from an existing
+    /// terminal that's harmless — `TERM` is inherited and looks right by
+    /// accident. Launched from a desktop launcher (Finder, the macOS
+    /// Dock, a Linux `.desktop` entry) there is usually **no `TERM` at
+    /// all**, and a shell that can't identify the terminal degrades:
+    /// zsh in particular disables or cripples its line editor, which
+    /// shows up as ordinary keys like Backspace doing nothing.
+    ///
+    /// `xterm-256color` rather than a bespoke `pain` entry: a custom
+    /// `TERM` only works where its terminfo is installed, so it breaks
+    /// the moment someone SSHes to a machine that's never heard of this
+    /// app. `xterm-256color` is present essentially everywhere and
+    /// accurately describes what `alacritty_terminal` implements.
+    /// `COLORTERM` is the conventional out-of-band signal for 24-bit
+    /// color, which the renderer does support.
+    fn set_terminal_env(cmd: &mut CommandBuilder) {
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
     }
 
     /// Returns a fresh handle for reading the shell's output.
@@ -300,5 +324,30 @@ mod tests {
 
         let reported = screen.cwd().expect("the injected OSC 7 hook should have reported some cwd by now");
         assert!(reported.is_absolute(), "expected an absolute path, got {reported:?}");
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    /// Guards a regression that is invisible whenever the app is launched
+    /// from an existing terminal — the inherited `TERM` masks it — and
+    /// only appears from a desktop launcher, which is exactly how it went
+    /// unnoticed until a user opened the macOS `.app` from Finder and
+    /// found Backspace dead in zsh.
+    ///
+    /// Asserts against the `CommandBuilder` directly rather than spawning
+    /// a shell and reading `$TERM` back: a spawn test would have to clear
+    /// `TERM` from this process to prove the value wasn't merely
+    /// inherited, and mutating process-global environment while the rest
+    /// of the suite runs in parallel threads is a worse hazard than the
+    /// coverage is worth.
+    #[test]
+    fn a_spawned_shell_is_told_which_terminal_it_is_talking_to() {
+        let mut cmd = CommandBuilder::new("sh");
+        Pty::set_terminal_env(&mut cmd);
+        assert_eq!(cmd.get_env("TERM").and_then(|v| v.to_str()), Some("xterm-256color"));
+        assert_eq!(cmd.get_env("COLORTERM").and_then(|v| v.to_str()), Some("truecolor"));
     }
 }

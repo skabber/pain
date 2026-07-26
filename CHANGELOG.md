@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.2.0
+
 - An application icon, and a desktop entry on Linux — the app now appears
   in the applications menu after `apt install` (previously it could only
   be launched by typing `pain` into some other terminal) and shows its own

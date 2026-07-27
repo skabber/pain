@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.6.0
+
 - On Linux and macOS, nothing is injected into your shell at all any more.
   Working directories for session restore are read straight from the
   operating system's process table instead of relying on the shell to

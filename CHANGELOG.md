@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.5.0
+
 - Clipboard shortcuts now match what people actually expect. On Windows
   and Linux, `Ctrl+C` copies when text is selected and still sends an
   interrupt when nothing is — so it gains the familiar meaning without

@@ -1,0 +1,332 @@
+.TH PAIN 1 "2026-07-27" "pain 1.4.1" "User Commands"
+.SH NAME
+pain \- cross-platform, multi-pane terminal emulator
+.SH SYNOPSIS
+.B pain
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B pain
+is a terminal emulator for Windows, macOS, and Linux with nested split
+panes, pane grouping with broadcast input, and session persistence. It is
+built on Alacritty's VT and PTY backend with an original GPU-rendered
+frontend.
+.PP
+It takes no positional arguments and cannot be told what to run: every pane
+starts the configured default shell. See
+.B default_shell
+under
+.BR CONFIGURATION .
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary, including the resolved config file path for this
+machine, and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.BR \-v ", " \-\-verbose [ =\fILIST\fR ]
+Enable diagnostic logging on standard error.
+.I LIST
+is a comma-separated list of categories. The bare flag enables
+.B general
+alone, because the other categories are high-frequency enough to drown it
+out; each is an explicit opt-in.
+.RS
+.TP
+.B general
+Startup information, config load and reload, shell spawn and exit.
+.TP
+.B mouse
+Every mouse event: motion, clicks, drags, wheel.
+.TP
+.B pty
+Every chunk read from, and every keystroke written to, a shell.
+.TP
+.B foreground
+The per-pane foreground-process scan that keeps pane titles current, which
+runs roughly every 500ms per pane.
+.TP
+.B all
+All of the above.
+.RE
+.SH KEYBOARD SHORTCUTS
+Every shortcut below is a default and can be changed; see
+.B [keybindings]
+under
+.BR CONFIGURATION .
+Keys not listed here are passed through to the shell unmodified.
+.SS Panes
+.TP
+.B Ctrl+Shift+O
+Split the focused pane horizontally.
+.TP
+.B Ctrl+Shift+E
+Split the focused pane vertically.
+.TP
+.B Ctrl+Shift+W
+Close the focused pane. Closing the last one exits.
+.TP
+.B Ctrl+Shift+X
+Zoom the focused pane to fill the window, or restore it.
+.TP
+.BR Alt+Up ", " Alt+Down ", " Alt+Left ", " Alt+Right
+Move focus to the neighbouring pane in that direction.
+.TP
+.BR Ctrl+Shift+Up ", " Ctrl+Shift+Down ", " Ctrl+Shift+Left ", " Ctrl+Shift+Right
+Resize the focused pane in that direction.
+.TP
+.B Ctrl+Shift+Q
+Quit, saving the session.
+.SS Clipboard
+.TP
+.B Ctrl+C
+On Windows and Linux: copy the selection if there is one, and otherwise
+send an interrupt to the running program, as it always has. Copying clears
+the selection, so a second press interrupts rather than copying again.
+On macOS this is left alone and always interrupts.
+.TP
+.B Ctrl+V
+On Windows and Linux: paste. This displaces readline's
+.B quoted\-insert
+binding; set
+.RB \(dq ctrl+v \(dq
+to
+.RB \(dq none \(dq
+in
+.B [keybindings]
+to get it back. On macOS this is left alone.
+.TP
+.BR Cmd+C ", " Cmd+V
+macOS only: copy and paste.
+.TP
+.BR Cmd+Q ", " Cmd+W
+macOS only: quit, and close the focused pane.
+.PP
+.BR Ctrl+Shift+C " and " Ctrl+Shift+V,
+the usual Linux-terminal clipboard chords, are not bound. They existed only
+because the unshifted pair was unavailable, which is no longer true on
+either platform. Bind them back in
+.B [keybindings]
+if you have the muscle memory:
+.RB \(dq ctrl+shift+c \(dq
+to
+.RB \(dq copy \(dq,
+and
+.RB \(dq ctrl+shift+v \(dq
+to
+.RB \(dq paste \(dq.
+.PP
+Pasted text is wrapped in bracketed-paste markers when the running program
+has asked for them, so a shell holds it at the prompt for review rather
+than executing each line as it arrives. When the program has not asked for
+them, a multi-line paste asks for confirmation first and shows exactly what
+will be sent; see
+.B confirm_multiline_paste
+under
+.BR CONFIGURATION .
+.SS Broadcast
+Broadcast sends your keystrokes to more than one pane at once. It has no
+default chord and is set from the title-bar context menu, but the actions
+.BR broadcast_off ", " broadcast_group ", and " broadcast_all
+can be bound in
+.BR [keybindings] .
+Assigning a pane to a group is menu-only, because it needs a group name
+that a chord cannot carry.
+.SH MOUSE
+.TP
+.B Double-click
+Select a word.
+.TP
+.B Triple-click
+Select a line.
+.TP
+.B Ctrl+click
+Open the URL under the pointer in your browser. Holding
+.B Ctrl
+underlines the URL first, so you can see what will open before clicking.
+.TP
+.B Shift+click
+Force a local text selection, bypassing mouse reporting. This is the
+standard escape hatch for selecting text inside full-screen programs such
+as vim or htop, which would otherwise consume the click themselves.
+.TP
+.B Right-click on a pane's title bar
+Open the pane menu: split, arrange, group, broadcast, swap shell, settings.
+.TP
+.B Right-click on a pane's contents
+Open the terminal menu: copy, paste, close.
+.TP
+.B Scroll wheel
+Scroll back through that pane's history.
+.SH CONFIGURATION
+Configuration is a TOML file, read at startup and re-read when it changes.
+Every key is optional and anything missing uses its default, so a partial
+file is valid. The file does not exist until settings are saved from the
+settings panel or you create it yourself.
+.PP
+A malformed file is never fatal: a parse failure at startup falls back to
+defaults with a message on standard error, and a bad edit while running
+keeps the settings already loaded rather than resetting them. Individual
+bad
+.B [keybindings]
+lines are skipped one at a time, not treated as poisoning the whole table.
+.SS [general]
+.TP
+.B default_shell
+String. The shell every new pane starts. Empty (the default) means the
+platform's own default:
+.B $SHELL
+on Unix, and the configured default shell on Windows.
+.TP
+.B scrollback_lines
+Integer, default
+.BR 5000 .
+Lines of history kept per pane.
+.TP
+.B confirm_multiline_paste
+Boolean, default
+.BR true .
+Ask before pasting text that would run more than one command into a program
+that has not enabled bracketed paste. Turning this off removes the last
+check on an unreviewed paste executing arbitrary commands the instant it
+arrives.
+.SS [appearance]
+.TP
+.B theme
+String, default
+.BR \(dqdefault\(dq .
+Reserved; the theme format is not settled and this currently has no other
+valid value.
+.TP
+.B font_family
+String, default
+.BR \(dqmonospace\(dq .
+Any installed monospaced family. The settings panel lists what is
+available.
+.TP
+.B font_size
+Number, default
+.BR 13 .
+Scaled by the display's DPI factor, so this is a logical size and matches
+other applications on a scaled display rather than being raw pixels.
+.TP
+.B transparency
+Number from
+.B 0.0
+(fully transparent) to
+.B 1.0
+(opaque), default
+.BR 1.0 .
+.TP
+.B background_color
+String,
+.B #rrggbb
+hex, default
+.BR \(dq#0c0e11\(dq .
+An unparseable value falls back to the default rather than failing to load.
+.TP
+.B accent_color
+String,
+.B #rrggbb
+hex, default
+.BR \(dq#7fa2d6\(dq .
+Used for the cursor, the selection highlight, and interactive highlights in
+menus and the settings panel. Semantic colors, such as the broadcast-target
+border, are fixed and not affected by this.
+.SS [cursor]
+.TP
+.B style
+One of
+.BR block " (default), " underline ", " beam .
+.SS [keybindings]
+A table of chord to action name, overriding the built-in defaults. A chord
+is
+.BR + -separated,
+case-insensitive, with modifiers in any order and exactly one non-modifier
+segment: a single character, or
+.BR up ", " down ", " left ", or " right .
+The modifier
+.B ctrl
+may also be written
+.BR control ,
+and
+.B cmd
+may be written
+.BR logo ", " super ", or " win .
+.PP
+The action name
+.B none
+unbinds a chord with no replacement, which is how you hand a chord back to
+the shell. Recognized actions are:
+.PP
+.RS
+.BR split_horizontal ", " split_vertical ", " close_pane ", " quit ,
+.BR focus_up ", " focus_down ", " focus_left ", " focus_right ,
+.BR resize_up ", " resize_down ", " resize_left ", " resize_right ,
+.BR toggle_zoom ", " copy ", " copy_or_interrupt ", " paste ,
+.BR broadcast_off ", " broadcast_group ", " broadcast_all .
+.RE
+.PP
+Overrides are applied on top of a fresh copy of the defaults every time the
+file is read, so deleting a line restores that chord's built-in binding
+rather than leaving it stuck at the old override.
+.PP
+Example:
+.PP
+.RS
+.nf
+[keybindings]
+"ctrl+shift+t" = "split_vertical"
+"ctrl+v" = "none"
+.fi
+.RE
+.SH FILES
+.TP
+.I ~/.config/pain/config.toml
+Configuration on Linux, honouring
+.B $XDG_CONFIG_HOME
+if set.
+.TP
+.I ~/Library/Application Support/pain/config.toml
+Configuration on macOS.
+.TP
+.I %APPDATA%\[rs]pain\[rs]config.toml
+Configuration on Windows.
+.PP
+The session file, holding the saved layout, window size, and each pane's
+working directory, shell, and group, sits alongside the config file in the
+same directory. Run
+.B pain \-\-help
+to see the resolved path on the machine you are on.
+.SH ENVIRONMENT
+.TP
+.B SHELL
+On Unix, the default shell for new panes when
+.B default_shell
+is unset.
+.TP
+.B RUST_LOG
+Filter for internal log output, defaulting to
+.BR warn .
+This controls messages from the graphics stack and other libraries; it is
+separate from
+.BR \-\-verbose ,
+which controls this application's own diagnostics.
+.PP
+Panes are started with
+.B TERM=xterm\-256color
+and
+.BR COLORTERM=truecolor .
+.SH EXIT STATUS
+.B pain
+exits 0 when the last pane is closed or you quit, and non-zero if it could
+not start, most often because no GPU adapter or display was available.
+.SH SEE ALSO
+Project page and full documentation:
+.UR https://github.com/w-p/pain
+.UE
+.SH BUGS
+Report issues at
+.UR https://github.com/w-p/pain/issues
+.UE

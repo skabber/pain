@@ -123,6 +123,10 @@ Only after Step 4 is confirmed (option 1 or 2):
   dependencies, so leaving these at the old version breaks the build
   outright (`failed to select a version for the requirement`) — found
   the hard way the first time this skill ran; do not skip it.
+- Update `man/pain.1`'s `.TH` line, which carries both the version and the
+  date (`.TH PAIN 1 "<yyyy-mm-dd>" "pain <version>" "User Commands"`).
+  Nothing builds this file, so a stale version here is invisible until a
+  user runs `man pain` and is told the wrong thing.
 - Rename `CHANGELOG.md`'s `## Unreleased` heading to `## v<version>`, and
   add a fresh, empty `## Unreleased` heading above it.
 - Run `cargo build --workspace` to confirm the bump didn't break

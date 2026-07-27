@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- Clipboard shortcuts now match what people actually expect. On Windows
+  and Linux, `Ctrl+C` copies when text is selected and still sends an
+  interrupt when nothing is — so it gains the familiar meaning without
+  ever costing you the ability to stop a running command — and `Ctrl+V`
+  pastes. On macOS, `Cmd+C`/`Cmd+V` copy and paste (they previously did
+  nothing at all), `Cmd+Q` quits and `Cmd+W` closes a pane; `Ctrl` is
+  left entirely alone there, since Command is what the clipboard belongs
+  on.
+
+  `Ctrl+Shift+C`/`Ctrl+Shift+V` are no longer bound. Those chords only
+  ever existed because the unshifted pair wasn't available, which is no
+  longer true on either platform — keeping them would give one action two
+  shortcuts, the second of them the awkward one. Add
+  `"ctrl+shift+c" = "copy"` and `"ctrl+shift+v" = "paste"` to
+  `[keybindings]` if you have the muscle memory.
+
+- Menus, panels, and dialogs are drawn whenever they need to be. Hover
+  highlights update, closing one no longer leaves it on screen until some
+  unrelated click forces a repaint, and a click on a menu item can no
+  longer also start a text selection in the pane behind it. All three came
+  from the same place: the overlay's own repaint requests were being
+  ignored, and egui's idea of where the pointer is only advances when a
+  frame runs — so a skipped frame left it answering questions about a
+  stale pointer position.
+- Menus and dialogs now render at their content's full size and scroll
+  only when the app window is genuinely too small for them. Several
+  scrolled regardless: the paste preview was pinned to 160 pixels tall,
+  and the context menus sized themselves against their own height from the
+  previous frame — a loop that settles at whatever height a menu first
+  happened to take and leaves a scrollbar up for good, however much room
+  the window has. Panels squeezed narrow by a small window also now grow
+  back when it's widened again, instead of staying squeezed.
+- The settings panel's keybinding list is now a collapsible section,
+  folded away by default. It's reference material, not something you need
+  open while changing a font size.
+- Documentation. There's now a man page (`man pain`, shipped in the `.deb`),
+  and `pain --help`/`--version` do something — `--help` prints the config
+  file path resolved for the machine you're on, since "where does this keep
+  its settings" was previously answerable only by reading the source. The
+  README documents every keyboard shortcut and mouse action, and the config
+  file: where it lives per platform, every key with its default, and what
+  happens when the file is malformed.
+- The settings panel's Keybindings section now lists the bindings actually
+  in effect, defaults included, marking the ones your config changed. It
+  previously showed only overrides, so anyone who had never edited their
+  config — the people most likely to look — saw an empty box telling them
+  defaults existed without saying what they were.
+
 - Fixed: right-click menus, the settings panel, and the paste dialog were
   cut off by the window edge when the window was small. They now shrink to
   fit and scroll for whatever still doesn't, so every action stays

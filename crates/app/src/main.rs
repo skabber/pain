@@ -40,6 +40,17 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let args: Vec<String> = std::env::args().collect();
+    // Before anything that opens a window: `--help` on a GUI binary is
+    // nearly always run from a shell, and flashing a window up just to
+    // print usage would be worse than useless.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{}", usage());
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("pain {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if let Some(flag) = args.iter().find(|a| *a == "--verbose" || *a == "-v" || a.starts_with("--verbose=")) {
         verbose::set_verbose(flag.strip_prefix("--verbose="));
     }
@@ -55,6 +66,42 @@ fn main() -> anyhow::Result<()> {
     let mut app = App { waker: Some(waker::Waker::new(event_loop.create_proxy())), ..App::default() };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--help` output. The config path is resolved at runtime rather than
+/// described in prose ("under your platform's config directory") because
+/// "where does this thing keep its settings" is the single most common
+/// reason to run `--help` on an app with no other flags, and the honest
+/// answer differs per platform.
+fn usage() -> String {
+    format!(
+        "\
+pain {version} — a cross-platform, multi-pane terminal emulator
+
+Usage: pain [OPTIONS]
+
+Options:
+  -h, --help              Print this help and exit
+  -V, --version           Print the version and exit
+  -v, --verbose[=LIST]    Enable diagnostic logging on stderr
+
+Verbose categories, comma-separated. The bare flag enables `general`
+alone; the rest are high-frequency and would drown it out:
+  general       Startup, config load/reload, shell spawn and exit
+  mouse         Every motion, click, drag, and wheel event
+  pty           Every chunk read from, or keystroke written to, a shell
+  foreground    The per-pane process scan that keeps titles current
+  all           All of the above
+
+Config file (TOML, created on first save; all keys optional):
+  {config}
+
+Keyboard shortcuts and the full config schema are in `man pain`, or in
+the README at https://github.com/w-p/pain
+",
+        version = env!("CARGO_PKG_VERSION"),
+        config = config::Config::default_path().display(),
+    )
 }
 
 /// Builds the event loop, forcing X11 under WSL.
@@ -284,7 +331,8 @@ impl ApplicationHandler for App {
         // Only pointer/keyboard input actually needs the consumed check —
         // a click or keypress landing on the overlay shouldn't also reach
         // the pane grid or divider hit-testing underneath it.
-        let mut ui_consumed = graphics.ui_consume_event(&event);
+        let ui_response = graphics.ui_handle_event(&event);
+        let mut ui_consumed = ui_response.consumed;
         // `egui-winit` marks *every* Tab keypress "consumed" unconditionally
         // — it's hardcoded as egui's own focus-cycling convention ("Tab
         // always consumes", regardless of whether anything is even
@@ -297,7 +345,23 @@ impl ApplicationHandler for App {
         if ui_consumed && is_tab_key(&event) && !graphics.ui_wants_keyboard_focus() {
             ui_consumed = false;
         }
-        if ui_consumed {
+        // `repaint`, not `consumed`. Hovering a menu button reports
+        // `consumed: false` — egui only claims the pointer once something
+        // is actually being dragged — so keying the redraw off `consumed`
+        // meant hover highlights never updated. It's also worse than a
+        // cosmetic problem: egui's pointer position only advances when a
+        // frame consumes the queued input, so skipping frames leaves it
+        // answering `wants_pointer_input` about a stale position. A press
+        // then reads as "not over the overlay", falls through to the pane
+        // underneath, and starts a text selection — while egui, a frame
+        // later, still sees the click land on the menu item.
+        //
+        // Gated on something actually being open: egui reports `repaint`
+        // for every cursor move, and with no menu on screen there's nothing
+        // for it to draw or hover, so acting on that would repaint on every
+        // mouse twitch over a bare terminal — the idle cost this loop was
+        // reworked to get rid of.
+        if ui_response.repaint && graphics.ui_is_open() {
             graphics.window().request_redraw();
         }
         if verbose::is_verbose(verbose::Category::Mouse) && matches!(event, WindowEvent::MouseInput { .. }) {

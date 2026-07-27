@@ -185,6 +185,9 @@ pub struct Graphics {
     /// this is what stops a twice-a-second poll turning into a
     /// twice-a-second repaint of an otherwise idle terminal.
     last_titles: HashMap<PaneId, String>,
+    /// When the UI overlay next needs drawing, as egui reported at the end
+    /// of the last frame. `None` means it's settled and nothing is owed.
+    ui_repaint_at: Option<std::time::Instant>,
 }
 
 impl Graphics {
@@ -410,6 +413,7 @@ impl Graphics {
             foreground_processes: crate::foreground_process::ForegroundProcesses::new(),
             waker,
             last_titles: HashMap::new(),
+            ui_repaint_at: None,
         };
         graphics.resize_panes_to_geometry();
         Ok(graphics)
@@ -512,10 +516,10 @@ impl Graphics {
         }
     }
 
-    /// Feeds a window event to the UI overlay. Returns whether it was
-    /// consumed — the caller should skip pane/divider handling of the same
-    /// event when this is true.
-    pub fn ui_consume_event(&mut self, event: &winit::event::WindowEvent) -> bool {
+    /// Feeds a window event to the UI overlay. The caller must skip
+    /// pane/divider handling of the same event when the result is
+    /// `consumed`, and must honour `repaint` — see `ui::UiEventResponse`.
+    pub fn ui_handle_event(&mut self, event: &winit::event::WindowEvent) -> crate::ui::UiEventResponse {
         self.ui.on_window_event(&self.window, event)
     }
 
@@ -550,6 +554,15 @@ impl Graphics {
     /// handling.
     pub fn ui_wants_keyboard_focus(&self) -> bool {
         self.ui.wants_keyboard_focus()
+    }
+
+    /// Whether the overlay currently has anything on screen. Gates acting
+    /// on egui's repaint requests: with nothing open there is nothing for
+    /// it to draw or hover, so honouring them would repaint on every mouse
+    /// twitch over a bare terminal — exactly the idle cost the event loop
+    /// was reworked to eliminate.
+    pub fn ui_is_open(&self) -> bool {
+        self.ui.is_open()
     }
 
     /// The window this GPU context is rendering into.
@@ -706,6 +719,10 @@ impl Graphics {
             // there's no pointer involved in a keyboard chord.
             router::Action::Copy => {
                 self.copy_selection(self.focused);
+                true
+            }
+            router::Action::CopyOrInterrupt => {
+                self.copy_or_interrupt(self.focused);
                 true
             }
             router::Action::Paste => {
@@ -1237,6 +1254,30 @@ impl Graphics {
         Self::copy_to_clipboard(text);
     }
 
+    /// What plain `Ctrl+C` does: copies `pane`'s selection if it has one,
+    /// and otherwise interrupts whatever's running. The interrupt is sent
+    /// through the normal input path, so broadcast mode still reaches every
+    /// target pane exactly as it did when this key was plain passthrough.
+    ///
+    /// Copying deliberately *clears* the selection afterwards. A selection
+    /// stays highlighted long after the drag that made it, so without this
+    /// a pane could sit in a state where Ctrl+C copies forever and never
+    /// interrupts — pressing it twice would leave a runaway program still
+    /// running, which is the one outcome this binding must never produce.
+    pub fn copy_or_interrupt(&mut self, pane: PaneId) {
+        let has_selection = self.panes.get(&pane).is_some_and(|session| !session.selection_is_empty());
+        if !has_selection {
+            if let Err(err) = self.send_input(&[0x03]) {
+                eprintln!("failed to write interrupt to pane: {err:#}");
+            }
+            return;
+        }
+        self.copy_selection(pane);
+        if let Some(session) = self.panes.get_mut(&pane) {
+            session.clear_selection();
+        }
+    }
+
     fn copy_to_clipboard(text: String) {
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => {
@@ -1367,9 +1408,18 @@ impl Graphics {
             outcome.needs_redraw = true;
         }
 
-        // Menus and the settings panel animate and respond to hover, so
-        // while any of them is open the UI drives its own repaints.
-        if self.ui.wants_keyboard_focus() {
+        // Whatever egui asked for at the end of the last frame — another
+        // frame immediately, one at the end of an animation, or nothing.
+        //
+        // This used to repaint unconditionally while any menu was open,
+        // which was both too much and too little: it burned a frame every
+        // poll for a menu sitting perfectly still, and it stopped the
+        // instant a panel closed — which is precisely the frame egui most
+        // needs, since closing is only *observed* on the frame after the
+        // click. The window would stay painted on screen until some
+        // unrelated event forced a redraw.
+        if self.ui_repaint_at.is_some_and(|at| std::time::Instant::now() >= at) {
+            self.ui_repaint_at = None;
             outcome.needs_redraw = true;
         }
 
@@ -1400,7 +1450,14 @@ impl Graphics {
     /// When the next foreground-process scan is due — the only periodic
     /// work left, and therefore what decides how long the loop may sleep.
     pub fn next_poll_deadline(&self) -> std::time::Instant {
-        self.foreground_processes.next_refresh_at()
+        let title_scan = self.foreground_processes.next_refresh_at();
+        // Whichever comes first. Without egui's deadline in here, an
+        // animation or a pending settle-frame would wait out the full
+        // title-scan interval before being drawn.
+        match self.ui_repaint_at {
+            Some(ui) => title_scan.min(ui),
+            None => title_scan,
+        }
     }
 
     /// Draws the current state. Assumes `poll` has already run; this does
@@ -1696,6 +1753,9 @@ impl Graphics {
             ui_output,
         );
         self.queue.submit(Some(ui_encoder.finish()));
+        // Read after `show`, since that's what computes it. `poll` picks
+        // this up on the next pass round the loop.
+        self.ui_repaint_at = self.ui.repaint_at();
 
         self.window.pre_present_notify();
         frame.present();

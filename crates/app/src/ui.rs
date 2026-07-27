@@ -17,6 +17,8 @@
 //! separate menu bar this app doesn't have) — an `egui::Window` is the
 //! right container for that, unlike for the always-on broadcast controls.
 
+use std::collections::BTreeMap;
+
 use layout::{Arrangement, Orientation, PaneId};
 use router::BroadcastMode;
 use winit::event::WindowEvent;
@@ -55,6 +57,69 @@ pub struct Ui {
     /// confirm) so what gets sent is exactly what was described in the
     /// prompt, even if the clipboard changes while the dialog is open.
     paste_confirm: Option<(PaneId, String)>,
+    /// The keybinding rows the settings panel lists, cached alongside the
+    /// overrides they were built from. Rebuilding them is cheap, but
+    /// `Keymap::apply_overrides` reports unparseable lines to stderr — and
+    /// this panel redraws every frame, so recomputing unconditionally would
+    /// turn one bad config line into an endless stream of warnings.
+    binding_rows: Option<(BTreeMap<String, String>, Vec<BindingRow>)>,
+    /// How long until egui needs to be drawn again, as of the last `show`.
+    /// `Duration::MAX` means "not until something happens". See where it's
+    /// assigned for why ignoring this leaves stale chrome on screen.
+    repaint_after: std::time::Duration,
+}
+
+/// What the overlay wants done about a window event.
+///
+/// `repaint` is not optional bookkeeping. egui only learns where the
+/// pointer is when a frame consumes the queued input, so skipping the
+/// frame leaves its idea of the pointer stale — and a stale pointer means
+/// hover highlights that never update and, worse, `wants_pointer_input`
+/// answering about the wrong position, which is how a click meant for a
+/// menu ends up starting a text selection in the pane behind it.
+#[derive(Clone, Copy)]
+pub struct UiEventResponse {
+    pub consumed: bool,
+    pub repaint: bool,
+}
+
+/// One row of the settings panel's read-only keybinding list.
+struct BindingRow {
+    chord: String,
+    action: String,
+    /// Whether config changed this from the built-in default — which is
+    /// the one thing this list can tell you that the docs can't.
+    custom: bool,
+}
+
+/// The keybindings actually in effect: the built-in defaults with
+/// `overrides` layered on, each marked with whether config changed it.
+///
+/// Chords the config *unbound* are listed too, rather than simply being
+/// absent. A chord vanishing from this list is indistinguishable from one
+/// that was never there, so someone hunting a shortcut that stopped working
+/// would get no hint that their own config is what removed it.
+fn effective_binding_rows(overrides: &BTreeMap<String, String>) -> Vec<BindingRow> {
+    let defaults = router::Keymap::terminator_defaults();
+    let mut effective = router::Keymap::terminator_defaults();
+    effective.apply_overrides(overrides);
+
+    let mut rows: Vec<BindingRow> = effective
+        .bindings()
+        .into_iter()
+        .map(|(chord, action)| BindingRow {
+            chord: chord.to_string(),
+            action: action.name().to_string(),
+            custom: defaults.lookup(chord) != Some(action),
+        })
+        .collect();
+
+    rows.extend(defaults.bindings().into_iter().filter(|(chord, _)| effective.lookup(*chord).is_none()).map(
+        |(chord, _)| BindingRow { chord: chord.to_string(), action: "(unbound)".to_string(), custom: true },
+    ));
+
+    rows.sort_by(|a, b| a.chord.cmp(&b.chord));
+    rows
 }
 
 /// What the user asked for by interacting with the menu this frame.
@@ -174,15 +239,25 @@ impl Ui {
             swap_shell_input: String::new(),
             settings_panel: None,
             paste_confirm: None,
+            binding_rows: None,
+            repaint_after: std::time::Duration::MAX,
         }
+    }
+
+    /// When egui next needs a frame, as of the last `show`. `None` means
+    /// nothing is pending and the loop is free to sleep until some other
+    /// event arrives.
+    pub fn repaint_at(&self) -> Option<std::time::Instant> {
+        std::time::Instant::now().checked_add(self.repaint_after)
     }
 
     /// Feeds a window event to egui. Returns whether egui consumed it —
     /// callers should not also treat the event as pane/divider input when
     /// this is true (e.g. a click landing on the menu shouldn't also focus
     /// whatever pane happens to be underneath it).
-    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> bool {
-        self.state.on_window_event(window, event).consumed
+    pub fn on_window_event(&mut self, window: &Window, event: &WindowEvent) -> UiEventResponse {
+        let response = self.state.on_window_event(window, event);
+        UiEventResponse { consumed: response.consumed, repaint: response.repaint }
     }
 
     /// Whether the pane-management menu, the terminal context menu, or the
@@ -192,6 +267,11 @@ impl Ui {
     /// the pane underneath — see `main.rs`'s Tab-key handling for why this
     /// matters.
     pub fn wants_keyboard_focus(&self) -> bool {
+        self.is_open()
+    }
+
+    /// Whether any menu, panel, or dialog is currently on screen.
+    pub fn is_open(&self) -> bool {
         self.context_menu.is_some()
             || self.terminal_context_menu.is_some()
             || self.settings_panel.is_some()
@@ -294,6 +374,17 @@ impl Ui {
         let mut group_name_input = core::mem::take(&mut self.group_name_input);
         let mut swap_shell_input = core::mem::take(&mut self.swap_shell_input);
 
+        // Rebuild the keybinding list only when the overrides it's derived
+        // from actually changed, then move it out for the closure the same
+        // way as everything above. The cache isn't about speed — see the
+        // field's own comment for why recomputing every frame is harmful.
+        if self.binding_rows.as_ref().is_none_or(|(cached, _)| *cached != settings.keybindings) {
+            self.binding_rows =
+                Some((settings.keybindings.clone(), effective_binding_rows(&settings.keybindings)));
+        }
+        let binding_rows = self.binding_rows.take();
+        let rows: &[BindingRow] = binding_rows.as_ref().map_or(&[], |(_, rows)| rows.as_slice());
+
         // `run_ui`, not `begin_pass`/`end_pass`: the latter never sets
         // egui's internal `root_ui_available_rect` (that's only populated
         // by `run_ui`'s root-Ui bookkeeping), which makes
@@ -326,7 +417,20 @@ impl Ui {
                             // egui's own layout source), not a hunch.
                             let (width, max_height) = popup_bounds(&ctx, 240.0);
                             ui.set_width(width);
-                            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                            // Against the *window's* height, not the menu's
+                            // own. An `Area` hands its content a `max_rect`
+                            // of the area's size as measured last frame, so
+                            // a `ScrollArea` left to read `available_height`
+                            // sizes itself against the menu it is itself
+                            // inside — a loop that latches at whatever
+                            // height it first happened to take and leaves a
+                            // scrollbar up permanently, however much room
+                            // the window actually has. Setting the budget
+                            // explicitly breaks that: the menu now renders
+                            // at its natural height and only scrolls when
+                            // the window genuinely can't fit it.
+                            ui.set_max_height(max_height);
+                            egui::ScrollArea::vertical().show(ui, |ui| {
                             section_header(ui, "Broadcast");
                             // A horizontal radio row, not a vertical
                             // selectable-list: only one mode is ever active
@@ -518,7 +622,11 @@ impl Ui {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             let (width, max_height) = popup_bounds(&ctx, 140.0);
                             ui.set_width(width);
-                            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                            // See the pane menu above for why this budget
+                            // has to come from the window rather than from
+                            // whatever `available_height` reports here.
+                            ui.set_max_height(max_height);
+                            egui::ScrollArea::vertical().show(ui, |ui| {
                             if ui.button("Copy").clicked() {
                                 request.copy_selection = Some(pane);
                                 close_terminal_after = true;
@@ -553,6 +661,9 @@ impl Ui {
                         // it, and nothing can spill outside the window.
                         let (dialog_width, _) = popup_bounds(&ctx, 420.0);
                         ui.set_width(dialog_width);
+                        // A `Window`, so it needs room for its chrome — see
+                        // `panel_content_height`.
+                        ui.set_max_height(panel_content_height(ctx.content_rect().height()));
                         section_header(ui, "This paste will run immediately");
                         ui.label(
                             "The program in this pane hasn't enabled bracketed paste, so every \
@@ -561,10 +672,16 @@ impl Ui {
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new(crate::paste::summarize(text)).monospace().color(MUTED));
                         ui.add_space(4.0);
-                        // A scrollable, read-only view of exactly what will
-                        // be sent — the whole point of the prompt is that
-                        // the user can actually look at it first.
-                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                        // A read-only view of exactly what will be sent —
+                        // the whole point of the prompt is that the user
+                        // can actually look at it first. Shows the paste
+                        // whole whenever the window can fit it, and scrolls
+                        // only past that; it was pinned at 160px, which
+                        // scrolled a four-line paste on a full-screen
+                        // window for no reason.
+                        egui::ScrollArea::vertical()
+                            .max_height(flexible_region_height(ui.available_height()))
+                            .show(ui, |ui| {
                             ui.add(
                                 egui::TextEdit::multiline(&mut text.as_str())
                                     .desired_width(f32::INFINITY)
@@ -602,10 +719,28 @@ impl Ui {
                     .default_width(420.0)
                     .open(&mut still_open)
                     .show(&ctx, |ui| {
-                    // Bounded height so a short window can still scroll
-                    // to Save and Cancel instead of having them pushed
-                    // off the bottom with no way to get at them.
-                    ui.set_max_height(popup_bounds(&ctx, 420.0).1);
+                    // Deliberately *not* `Window::scroll`. That enables
+                    // egui's own built-in scroll area, which is built as
+                    // `ScrollArea::neither().auto_shrink(false)` — the
+                    // `auto_shrink(false)` makes it fill all available
+                    // height instead of fitting its content, so the panel
+                    // stretched to the full window and scrolled with room
+                    // to spare. Our own scroll area below can be configured
+                    // to shrink to content, which is what's wanted.
+                    //
+                    // Recomputed every frame, not just set once via
+                    // `default_width`. `Area::constrain` shrinks a window's
+                    // remembered size to fit when the app window narrows,
+                    // and nothing ever grows it back — so a panel squeezed
+                    // by a narrow window stayed squeezed after the window
+                    // was widened again. Re-asserting the width each frame
+                    // is what the context menus were already doing, which
+                    // is why they never had this problem.
+                    let (panel_width, _) = popup_bounds(&ctx, 420.0);
+                    ui.set_width(panel_width);
+                    // Never taller than the app window it sits in; sized by
+                    // its content below that.
+                    ui.set_max_height(panel_content_height(ctx.content_rect().height()));
                     // Proportional, not pixel-fixed: a fraction of
                     // whatever the window's *actual current* width is,
                     // recomputed every frame, rather than hardcoded
@@ -621,6 +756,15 @@ impl Ui {
                     // window's), unlike the runaway values that came from
                     // calling it deep inside a `Grid`/`Area` before their
                     // own size was known.
+                    // Everything, including Save/Cancel, sits inside one
+                    // scroll area. `auto_shrink` vertical means it takes
+                    // exactly its content's height and shows no scrollbar
+                    // until the panel genuinely outgrows the app window;
+                    // horizontal off so it fills the panel's width. Having
+                    // the buttons *inside* it is the point: with them
+                    // outside, an expanded keybinding list grew past the
+                    // bottom and drew straight over them.
+                    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                     let content_width = ui.available_width();
                     let label_width = (content_width * LABEL_COL_FRACTION).clamp(80.0, 160.0);
                     let value_width = (content_width - label_width - GRID_COLUMN_GAP).max(80.0);
@@ -778,14 +922,36 @@ impl Ui {
                     // to change these (Milestone 5.3) — remapping chords
                     // from inside the panel is future polish, not something
                     // 5.4's own acceptance criteria call for.
-                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                        if settings.keybindings.is_empty() {
-                            ui.weak("(none — using built-in defaults)");
-                        }
-                        for (chord, action) in &settings.keybindings {
-                            ui.label(format!("{chord}  \u{2192}  {action}"));
-                        }
-                    });
+                    //
+                    // Lists what's *in effect*, defaults included, rather
+                    // than only the overrides. Showing overrides alone made
+                    // this section useless to the people most likely to
+                    // open it: someone who has never edited the config sees
+                    // an empty box telling them defaults exist, without
+                    // saying what any of them are.
+                    ui.weak("Edit [keybindings] in config.toml to change these.");
+                    ui.add_space(2.0);
+                    // Collapsed by default, and never scrolled: the list is
+                    // long, but it's reference material nobody needs open
+                    // while changing a font size. Folding it away keeps the
+                    // panel short enough to render whole, which a scrolling
+                    // sub-region never managed — and when it is open it's
+                    // read top to bottom, so a viewport showing six rows at
+                    // a time is worse than simply being tall.
+                    egui::CollapsingHeader::new("Show all keybindings")
+                        .id_salt("keybindings-list")
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            for row in rows {
+                                let text = format!("{}  \u{2192}  {}", row.chord, row.action);
+                                if row.custom {
+                                    ui.label(format!("{text}   (custom)"));
+                                } else {
+                                    ui.weak(text);
+                                }
+                            }
+                        });
                     ui.separator();
                     // `right_to_left`: the mockup's action row is flush
                     // against the panel's right edge (Cancel, then Save
@@ -808,6 +974,7 @@ impl Ui {
                             close_settings_panel = true;
                         }
                     });
+                    });
                 });
                 if !still_open {
                     // The window's own close button, not either of our
@@ -819,6 +986,8 @@ impl Ui {
                 }
             }
         });
+
+        self.binding_rows = binding_rows;
 
         if close_after {
             self.context_menu = None;
@@ -835,6 +1004,20 @@ impl Ui {
         if !paste_confirm_handled {
             self.paste_confirm = paste_confirm;
         }
+
+        // egui is a immediate-mode library that routinely needs more than
+        // one frame to settle: a click is only *observed* by the widget
+        // that owns it during the frame after it lands, so the frame where
+        // "Close" reports `clicked()` is the same frame that still draws
+        // the window. Something has to ask for the frame after that, or
+        // the last thing drawn stays on screen. `repaint_delay` is egui
+        // telling us when it next needs to be drawn — `ZERO` for "again,
+        // immediately", a real duration for an animation in progress, and
+        // effectively forever once everything has settled.
+        self.repaint_after = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::MAX, |viewport| viewport.repaint_delay);
 
         self.state.handle_platform_output(window, full_output.platform_output.clone());
         (request, full_output)
@@ -972,6 +1155,44 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
 fn popup_bounds(ctx: &egui::Context, preferred_width: f32) -> (f32, f32) {
     let screen = ctx.content_rect();
     fit_popup(preferred_width, screen.width(), screen.height())
+}
+
+/// How tall a panel's one growable region may get, given the vertical
+/// budget still unspent at that point in the panel.
+///
+/// Reserves room for the separator and button row that follow it. Without
+/// that, content long enough to eat the remaining space would push the
+/// buttons past the bottom of a window that doesn't scroll — leaving no way
+/// to act on the dialog at all.
+fn flexible_region_height(available: f32) -> f32 {
+    /// Separator, spacing, and one row of buttons.
+    const ACTION_ROW_RESERVE: f32 = 48.0;
+    /// Below this the list is too cramped to read, and scrolling it is
+    /// better than shrinking it further.
+    const MIN_HEIGHT: f32 = 72.0;
+    (available - ACTION_ROW_RESERVE).max(MIN_HEIGHT)
+}
+
+/// Vertical room for the *content* of an `egui::Window`-based panel.
+///
+/// `fit_popup`'s height budget is for a bare `Area`, which is all content.
+/// A `Window` wraps that content in a title bar and frame padding, so
+/// handing it the same number makes the finished window taller than the app
+/// window by exactly the chrome — which is what left the settings panel's
+/// bottom edge hanging below the window even once it scrolled. `constrain`
+/// can slide an oversized window up, but it can't shrink it.
+///
+/// The chrome allowance is a fixed, slightly generous estimate rather than
+/// a measurement. Measuring it would mean deriving the panel's height from
+/// its own current position, and a size that depends on where the thing
+/// already is oscillates instead of settling. Erring high costs a few
+/// pixels of gap; erring low puts the buttons off-screen again.
+fn panel_content_height(window_height: f32) -> f32 {
+    const MARGIN: f32 = 12.0;
+    /// Title bar, plus frame padding above and below.
+    const CHROME: f32 = 48.0;
+    const MIN_HEIGHT: f32 = 80.0;
+    (window_height - MARGIN - CHROME).max(MIN_HEIGHT)
 }
 
 /// The sizing rule itself, split out from the egui lookup so it can be
@@ -1188,6 +1409,84 @@ fn graphite_visuals(accent_rgb: [f32; 3]) -> egui::Visuals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row<'a>(rows: &'a [BindingRow], chord: &str) -> Option<&'a BindingRow> {
+        rows.iter().find(|row| row.chord == chord)
+    }
+
+    /// The reason this section changed at all: someone who has never edited
+    /// their config used to see an empty box.
+    #[test]
+    fn an_empty_config_still_lists_every_built_in_binding() {
+        let rows = effective_binding_rows(&BTreeMap::new());
+
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|row| !row.custom), "nothing is custom without any overrides");
+        assert_eq!(row(&rows, "ctrl+shift+e").map(|r| r.action.as_str()), Some("split_vertical"));
+    }
+
+    #[test]
+    fn an_override_is_shown_in_effect_and_marked_custom() {
+        let rows = effective_binding_rows(&BTreeMap::from([(
+            "ctrl+shift+e".to_string(),
+            "close_pane".to_string(),
+        )]));
+
+        let changed = row(&rows, "ctrl+shift+e").expect("still listed");
+        assert_eq!(changed.action, "close_pane");
+        assert!(changed.custom);
+
+        // Everything the user didn't touch stays unmarked, so "(custom)"
+        // means something.
+        assert_eq!(row(&rows, "ctrl+shift+o").map(|r| r.custom), Some(false));
+    }
+
+    /// An unbound chord has to stay visible. Dropping it would make "I
+    /// unbound this" and "this never existed" look identical, which is
+    /// exactly the confusion someone opens this list to resolve.
+    #[test]
+    fn a_chord_the_config_unbound_is_listed_rather_than_dropped() {
+        let rows =
+            effective_binding_rows(&BTreeMap::from([("ctrl+shift+x".to_string(), "none".to_string())]));
+
+        let removed = row(&rows, "ctrl+shift+x").expect("listed even though it's unbound");
+        assert_eq!(removed.action, "(unbound)");
+        assert!(removed.custom);
+    }
+
+    #[test]
+    fn the_keybinding_list_takes_the_space_left_over_minus_the_buttons() {
+        // Whatever it gets, Save and Cancel keep their room below it.
+        assert_eq!(flexible_region_height(400.0), 352.0);
+        assert_eq!(flexible_region_height(200.0), 152.0);
+    }
+
+    /// The buttons matter more than the list: in a window too short for
+    /// both, the list stops shrinking and scrolls instead, rather than
+    /// squeezing Save and Cancel off the bottom of a window that has no
+    /// scrollbar of its own to reach them with.
+    #[test]
+    fn the_keybinding_list_stops_shrinking_before_it_squeezes_out_the_buttons() {
+        assert_eq!(flexible_region_height(100.0), 72.0);
+        assert_eq!(flexible_region_height(0.0), 72.0);
+    }
+
+    /// A `Window` panel has to leave room for its own title bar and frame,
+    /// or the finished window overhangs the app window by exactly that
+    /// much — which no amount of scrolling inside it can fix.
+    #[test]
+    fn a_window_panel_reserves_height_for_its_chrome() {
+        assert_eq!(panel_content_height(800.0), 740.0);
+        // Always less than the bare-`Area` budget for the same window,
+        // which is the whole distinction between the two.
+        assert!(panel_content_height(800.0) < fit_popup(420.0, 1200.0, 800.0).1);
+    }
+
+    #[test]
+    fn a_window_panel_keeps_a_usable_height_in_a_tiny_window() {
+        assert_eq!(panel_content_height(100.0), 80.0);
+        assert_eq!(panel_content_height(0.0), 80.0);
+    }
 
     #[test]
     fn a_roomy_window_gets_the_preferred_width() {

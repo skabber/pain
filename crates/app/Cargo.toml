@@ -66,6 +66,9 @@ recommends = "mesa-vulkan-drivers"
 assets = [
     ["target/release/pain", "usr/bin/", "755"],
     ["../../README.md", "usr/share/doc/pain/README.md", "644"],
+    # cargo-deb gzips anything under `usr/share/man/` itself, as Debian
+    # policy requires, so this is listed uncompressed.
+    ["../../man/pain.1", "usr/share/man/man1/pain.1", "644"],
     ["../../assets/pain.desktop", "usr/share/applications/", "644"],
     ["../../assets/pain.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["../../assets/pain-16.png", "usr/share/icons/hicolor/16x16/apps/pain.png", "644"],

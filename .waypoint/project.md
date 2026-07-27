@@ -454,8 +454,16 @@ not yet re-verified there — needs another pass before Milestone 8
 
 **Deferred**
 
-- Tabs and multi-window — indefinitely, until there's demonstrated need. v1 is
-  split-panes only.
+- Tabs — deferred pending a design discussion, not for lack of demand: users
+  have now asked for them (2026-07-27). Noted here rather than started because
+  the model change is real — window → tabs → layout tree → panes, which
+  touches session persistence, the tab-bar chrome, and chord assignments. Two
+  questions to settle first: whether `Ctrl+Shift+W` closes the pane or the
+  tab, and whether broadcast-all means the current tab or every tab. The
+  non-obvious implementation risk: a background tab's PTYs still have to be
+  drained even though nothing renders them, or the pipe buffer fills and the
+  program blocks — a tab you switched away from would silently freeze.
+- Multi-window — indefinitely, until there's demonstrated need.
 - Default theme/color scheme and bundled presets — still undecided, see
   CONOPS §8.
 

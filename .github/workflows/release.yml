@@ -23,13 +23,19 @@ name: Release
 # commit, push to main, and — with the developer's explicit
 # confirmation each time — tag and push the tag too).
 #
-# `apt-repo` publishes the Linux build to a GPG-signed APT repository
-# hosted on the `gh-pages` branch (see that job for the full mechanics).
-# Like `release`, it only runs on a real tag push — a plain
-# `workflow_dispatch` build-matrix test shouldn't have the side effect of
-# publishing to the real public repo. `gh-pages` itself was bootstrapped
-# once, directly, rather than by this workflow (see that job's own
-# comment) — no manual-dispatch escape hatch is needed for it.
+# `pages` publishes everything served from the `gh-pages` branch — the
+# GPG-signed APT and DNF repositories and the AppImage (see that job for
+# the full mechanics). Like `release`, it only runs on a real tag push: a
+# plain `workflow_dispatch` build test shouldn't have the side effect of
+# publishing to the real public repositories. `gh-pages` itself was
+# bootstrapped once, directly, rather than by this workflow (see that
+# job's own comment) — no manual-dispatch escape hatch is needed for it.
+#
+# Packages are *not* verified here. `verify-packages.yml` installs each
+# one into a stock image of the distribution it targets and starts the
+# application for real; it runs on main and on demand, so a tag is pushed
+# only once that has already passed. Gating the release path on it would
+# make every release wait for work that's already been done.
 
 "on":
   push:
@@ -51,10 +57,6 @@ jobs:
         # selects only `pain-*` so these never get attached to a release
         # as downloads of their own.
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            name: linux-x86_64
-            artifact: pain-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: windows-x86_64
@@ -76,49 +78,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # winit/wgpu/arboard load these via `dlopen` at runtime rather than
-      # linking them at compile time (confirmed by inspecting the built
-      # binary — `ldd` shows only libc/libm/libgcc_s), so these `-dev`
-      # packages are very likely not actually required just to *build* —
-      # installed anyway since a stale/broken CI build is a worse outcome
-      # than one harmless extra `apt-get` call, and this hasn't been
-      # verified in a from-scratch container.
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxi-dev libxkbcommon-dev libwayland-dev libvulkan-dev libegl1-mesa-dev
-
-      # A single command builds *and* packages the `.deb` — cargo-deb
-      # invokes `cargo build --release --target ...` itself and resolves
-      # `[package.metadata.deb] assets`' `target/release/...` paths
-      # against whatever `--target` it was given automatically (confirmed
-      # directly: running it with a pre-built-without-`--target` binary
-      # and `--no-build` fails looking for `target/<triple>/release/pain`,
-      # so letting it do its own build is what keeps the two in sync).
-      - name: Build and package .deb (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cargo install cargo-deb --locked
-          cargo deb -p pain --target ${{ matrix.target }}
-
       - name: Build (Windows/macOS)
-        if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} -p pain
-
-      - name: Package archive (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          stage="pain-${{ matrix.name }}"
-          mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/pain" "$stage/"
-          cp LICENSE README.md "$stage/"
-          tar -czf "$stage.tar.gz" "$stage"
-          mkdir -p dist
-          mv "$stage.tar.gz" dist/
-          cp target/debian/*.deb dist/
 
       # macOS gets no archive here — just the bare binary, which the
       # `macos-bundle` job below `lipo`s together with the other
@@ -149,6 +110,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Linux is built in a container rather than on the runner, and so gets
+  # its own job instead of a matrix entry.
+  #
+  # The reason is glibc: it's backward compatible but not forward
+  # compatible, so a binary carries a floor from whatever it was linked
+  # against. Building on `ubuntu-latest` means that floor rises silently
+  # every time GitHub updates the runner image, cutting off users of older
+  # distributions with no change on our side. `Containerfile` pins the
+  # build to `ubuntu:22.04`, fixing the floor at glibc 2.35 until it's
+  # moved deliberately.
+  #
+  # It also produces all four Linux artifacts from one compile — tarball,
+  # .deb, .rpm, and AppImage — via the same script a developer runs
+  # locally, so what CI builds and what can be reproduced by hand are the
+  # same thing by construction.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Linux packages
+        run: ENGINE=docker ./scripts/linux-packages.sh build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pain-linux-x86_64
           path: dist/*
           if-no-files-found: error
 
@@ -246,7 +237,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build, macos-bundle]
+    needs: [build, linux, macos-bundle]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -290,35 +281,42 @@ jobs:
           files: dist/*
           fail_on_unmatched_files: true
 
-  # Publishes the Linux build to a flat, GPG-signed APT repository on the
-  # `gh-pages` branch (GitHub Pages serves it as static files — no server
-  # needed). Deliberately lightweight tooling for a single-package,
-  # single-architecture repo: `dpkg-scanpackages`/`apt-ftparchive`, not
-  # reprepro/aptly, which earn their complexity with many packages or
-  # distributions. The whole sequence (scan, sign, `apt-get update`
-  # against the result) was verified end-to-end against a real `apt`
-  # before writing this job, not assumed from documentation.
-  apt-repo:
-    needs: build
+  # Publishes everything the `gh-pages` branch serves, in one job and one
+  # push: the GPG-signed APT repository, the GPG-signed DNF repository,
+  # and the AppImage.
+  #
+  # One job, not three, specifically because they all commit to the same
+  # branch — separate jobs would race each other's pushes and one would
+  # lose. Combining them also means a release updates every channel
+  # atomically or none of them.
+  #
+  # Deliberately lightweight tooling for a single-package, single-
+  # architecture repo: `dpkg-scanpackages`/`apt-ftparchive` and
+  # `createrepo_c`, not reprepro/aptly. The APT half was verified
+  # end-to-end against a real `apt` before it was written; the packages
+  # themselves are verified by `Containerfile`'s test stages, which
+  # install each one into a stock image of its distribution and start the
+  # application for real.
+  pages:
+    needs: [linux]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download Linux artifact
+      - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
           name: pain-linux-x86_64
           path: incoming
 
-      # `dpkg-scanpackages`/`apt-ftparchive` come from `dpkg-dev`/
-      # `apt-utils` respectively — likely already on `ubuntu-latest`, but
-      # not verified against the actual runner image from this sandbox,
-      # so installed explicitly rather than assumed.
+      # `rpm` supplies `rpmsign`; `createrepo-c` builds the DNF metadata.
+      # Both are packaged on Debian/Ubuntu, which is what lets one
+      # Debian-family environment publish an RPM repository at all.
       - name: Install repo-building tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev apt-utils gnupg
+          sudo apt-get install -y dpkg-dev apt-utils gnupg rpm createrepo-c
 
       # `--multiversion` (below) is what makes it safe to layer this
       # secret import into the same job that keeps accumulating
@@ -329,7 +327,11 @@ jobs:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
         run: |
           echo "$APT_SIGNING_KEY" | gpg --batch --import
-          echo "KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')" >> "$GITHUB_ENV"
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')"
+          echo "KEYID=$KEYID" >> "$GITHUB_ENV"
+          # rpmsign finds its key by name through this macro rather than a
+          # command-line flag, so it has to be on disk before signing.
+          printf '%%_gpg_name %s\n' "$KEYID" > "$HOME/.rpmmacros"
 
       # `gh-pages` is bootstrapped once (an empty orphan branch with just
       # `.nojekyll`/`index.html`) and always exists from here on, so this
@@ -341,21 +343,19 @@ jobs:
       # fallback's own `git remote add origin` collided with a remote
       # that was already there. Simpler to guarantee the branch exists
       # than to make that fallback correctly idempotent.)
-      - name: Check out the APT repo (gh-pages)
+      - name: Check out gh-pages
         uses: actions/checkout@v4
         with:
           ref: gh-pages
-          path: apt-repo
+          path: pages
 
-      - name: Add this build's .deb to the pool
+      - name: Rebuild the APT repository
+        working-directory: pages
         run: |
-          mkdir -p apt-repo/pool
-          cp incoming/*.deb apt-repo/pool/
-
-      - name: Rebuild the repository index and sign it
-        working-directory: apt-repo
-        run: |
+          set -euo pipefail
           touch .nojekyll
+          mkdir -p pool
+          cp ../incoming/*.deb pool/
           dpkg-scanpackages --multiversion pool > Packages
           gzip -9c Packages > Packages.gz
           rm -f Release
@@ -363,20 +363,74 @@ jobs:
           gpg --batch --yes --local-user "$KEYID" --detach-sign --armor -o Release.gpg Release
           gpg --batch --yes --local-user "$KEYID" --clearsign -o InRelease Release
           gpg --export --armor "$KEYID" > pain-archive-keyring.asc
+
+      # RPM signs at two levels where APT signs at one: `gpgcheck=1`
+      # verifies a signature embedded in each package, and
+      # `repo_gpgcheck=1` verifies a detached signature over the repo
+      # metadata. Both are done here so the `.repo` file below can turn
+      # both checks on.
+      - name: Rebuild the DNF repository
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          mkdir -p rpm
+          cp ../incoming/*.rpm rpm/
+          rpm --addsign rpm/*.rpm
+          createrepo_c --update rpm
+          rm -f rpm/repodata/repomd.xml.asc
+          gpg --batch --yes --local-user "$KEYID" --detach-sign --armor rpm/repodata/repomd.xml
+          cat > rpm/pain.repo <<EOF
+          [pain]
+          name=pain
+          baseurl=https://${{ github.repository_owner }}.github.io/pain/rpm
+          enabled=1
+          gpgcheck=1
+          repo_gpgcheck=1
+          gpgkey=https://${{ github.repository_owner }}.github.io/pain/pain-archive-keyring.asc
+          EOF
+
+      # A fixed path, overwritten each release rather than published under
+      # a versioned name. The AppImage embeds this URL as its update
+      # information, and zsync can only find the new build if the URL
+      # doesn't move.
+      - name: Publish the AppImage
+        working-directory: pages
+        run: |
+          set -euo pipefail
+          mkdir -p appimage
+          cp ../incoming/pain-x86_64.AppImage appimage/
+          cp ../incoming/pain-x86_64.AppImage.zsync appimage/
+
+      - name: Rewrite the landing page
+        working-directory: pages
+        run: |
           cat > index.html <<EOF
-          <!doctype html><meta charset="utf-8"><title>pain APT repository</title>
+          <!doctype html><meta charset="utf-8"><title>pain — Linux packages</title>
+          <h1>pain</h1>
+          <h2>Debian / Ubuntu</h2>
           <pre>
           curl -fsSL https://${{ github.repository_owner }}.github.io/pain/pain-archive-keyring.asc | sudo gpg --dearmor -o /etc/apt/keyrings/pain.gpg
           echo "deb [signed-by=/etc/apt/keyrings/pain.gpg] https://${{ github.repository_owner }}.github.io/pain ./" | sudo tee /etc/apt/sources.list.d/pain.list
-          sudo apt update && sudo apt install pain
+          sudo apt update &amp;&amp; sudo apt install pain
+          </pre>
+          <h2>Fedora / RHEL</h2>
+          <pre>
+          sudo dnf config-manager --add-repo https://${{ github.repository_owner }}.github.io/pain/rpm/pain.repo
+          sudo dnf install pain
+          </pre>
+          <h2>Any other distribution</h2>
+          <pre>
+          curl -fLO https://${{ github.repository_owner }}.github.io/pain/appimage/pain-x86_64.AppImage
+          chmod +x pain-x86_64.AppImage
+          ./pain-x86_64.AppImage
           </pre>
           EOF
 
       - name: Commit and push gh-pages
-        working-directory: apt-repo
+        working-directory: pages
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Add ${{ github.ref_name }} to apt repo" || echo "Nothing new to commit"
+          git commit -m "Publish ${{ github.ref_name }} packages" || echo "Nothing new to commit"
           git push origin HEAD:gh-pages

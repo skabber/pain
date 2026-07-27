@@ -1,0 +1,64 @@
+name: Verify packages
+
+# Builds the Linux packages and then installs each one into a stock image
+# of the distribution family it targets and starts the application for
+# real, under a virtual display with software rendering.
+#
+# Separate from `release.yml` on purpose. This is the slow check, and
+# running it as a gate on the tag path would make every release wait for
+# it; running it on main means a tag is pushed only from a tree that has
+# already passed. The version-bump commit lands on main and *is* what
+# gets tagged, so this genuinely covers what ships.
+#
+# It shares `scripts/linux-packages.sh` and `Containerfile` with the
+# release workflow rather than assembling packages its own way. A check
+# that built them differently would drift from what actually ships and
+# stop testing it, which is worse than no check at all — it would still
+# read as coverage.
+#
+# `--version` alone would be a test that cannot fail: it returns before
+# the event loop starts, so it never reaches the X11, Wayland, xkbcommon
+# or Vulkan libraries, which are dlopen'd at runtime and are exactly the
+# dependency list most likely to be wrong. See `Containerfile` for how
+# the real check works.
+
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - "Containerfile"
+      - "scripts/linux-packages.sh"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/**"
+      - ".github/workflows/verify-packages.yml"
+  pull_request:
+    paths:
+      - "Containerfile"
+      - "scripts/linux-packages.sh"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "assets/**"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and verify the Linux packages
+        run: ENGINE=docker ./scripts/linux-packages.sh all
+
+      # Kept for inspection when something fails — the packages that were
+      # actually installed and started, not a rebuild of them.
+      - name: Upload the packages that were tested
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-linux-packages
+          path: dist/*
+          if-no-files-found: warn

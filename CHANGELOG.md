@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+- On Linux and macOS, nothing is injected into your shell at all any more.
+  Working directories for session restore are read straight from the
+  operating system's process table instead of relying on the shell to
+  report them, so bash starts exactly as it would in any other terminal —
+  no generated startup file, no `--rcfile`, nothing added to
+  `PROMPT_COMMAND`. It also means **zsh and fish panes now restore their
+  working directory**, which they never did, along with any other shell.
+  Windows still uses the old mechanism, having no way to read another
+  process's working directory.
+- Panes now start the shell the way the platform's own terminals do:
+  interactive non-login on Linux, where a desktop session has already read
+  the profile files, and login on macOS, where it hasn't — matching GNOME
+  Terminal and Konsole on one side and Terminal.app and iTerm2 on the
+  other. On macOS that means `~/.bash_profile` and `~/.zprofile` are read
+  again, which is where a Mac user's `PATH` usually lives.
+- Fixed: whether a pane's shell was a login shell depended on whether you
+  had set `default_shell` in your config — a setting that has nothing to
+  do with it. Leaving it unset gave a login shell and setting it gave a
+  non-login one, so two machines with the same dotfiles behaved
+  differently for no visible reason.
+- Fixed: bash panes started as if they were login shells, so `~/.bashrc`
+  was often run **twice**. The stock `~/.bash_profile` on Fedora and RHEL
+  — and commonly on Debian and Ubuntu — ends by sourcing `~/.bashrc`, and
+  we then sourced it again ourselves. Anything written to append rather
+  than assign did it twice too: duplicated `PATH` entries, duplicated
+  `PROMPT_COMMAND`, and prompt frameworks installing their hooks on top of
+  themselves, which is why it showed up as colors and prompts coming out
+  wrong. It also ran login-only setup (`ssh-agent`, tmux auto-attach) once
+  per pane instead of once per login, and printed the login message every
+  time a pane opened. Panes now start an ordinary interactive non-login
+  shell — the system bashrc and `~/.bashrc`, exactly like every other
+  terminal.
+- Fixed: on Fedora, RHEL and macOS the system bashrc (`/etc/bashrc`) was
+  never read at all, losing the system default prompt and the interactive
+  half of `/etc/profile.d`. Only Debian's `/etc/bash.bashrc` happened to
+  get picked up, and only indirectly.
+
+- Fedora, RHEL, Rocky and Alma get a GPG-signed DNF repository, so
+  `dnf install pain` and `dnf upgrade` work the same way `apt` already
+  did on Debian and Ubuntu.
+- An AppImage, for every other distribution — one file, no install, no
+  root, and it works on immutable systems like Silverblue, Kinoite and
+  Bazzite where layering a package means a reboot. See the README if your
+  distribution doesn't ship libfuse2 (Fedora and Ubuntu 24.04 among them).
+- Fixed: the Linux build picked up its glibc requirement from whatever
+  the CI runner happened to be running, which silently rose each time
+  GitHub updated that image and would eventually have stopped the package
+  installing on older distributions for no visible reason. The build now
+  happens in a pinned container, fixing the floor at glibc 2.35 — Debian
+  12+, Ubuntu 22.04+, and every current Fedora — until it's moved
+  deliberately.
+- The Linux packages now recommend a font. The application aborts if there
+  isn't one on disk, and while any machine with a graphical session has
+  fonts already, apt and dnf both install recommendations by default — so
+  an ordinary install can't land in that state.
+- Fixed: the Vulkan driver was a recommended dependency rather than a
+  required one, so installing with `--no-install-recommends` produced an
+  install that could never start. It's now required, as an alternation
+  that an NVIDIA driver satisfies too, so nobody is forced to install
+  Mesa's driver to satisfy it.
+
 ## v1.5.0
 
 - Clipboard shortcuts now match what people actually expect. On Windows

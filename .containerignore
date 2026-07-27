@@ -1,0 +1,12 @@
+# The build context is copied into the image, so keeping it small is the
+# difference between a fast rebuild and shipping a gigabyte of build
+# artifacts and git history into a layer.
+target/
+.git/
+dist/
+.github/
+.waypoint/
+vendor/**/target/
+*.deb
+*.rpm
+*.AppImage

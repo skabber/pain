@@ -54,8 +54,34 @@ A cross-platform terminal emulator with a Terminator-style multi-pane UX \
 Alacritty's VT/PTY backend with an original GPU-rendered frontend."""
 section = "x11"
 priority = "optional"
-depends = "$auto, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libvulkan1"
-recommends = "mesa-vulkan-drivers"
+#
+# `mesa-vulkan-drivers | vulkan-icd` is a hard dependency, not a
+# recommendation. Without *some* Vulkan driver there is no adapter for wgpu
+# to pick and the app cannot start at all, so `--no-install-recommends`
+# (routine in containers and on minimal systems) would otherwise produce an
+# install that only fails at launch. It's an alternation rather than a
+# plain `mesa-vulkan-drivers` because Mesa's driver specifically isn't
+# required — `vulkan-icd` is a virtual package the proprietary NVIDIA
+# packages provide too, and forcing Mesa onto an NVIDIA-only machine
+# installs drivers it will never load. Real package first so apt has an
+# unambiguous default; a bare virtual package can't be depended on alone,
+# since apt refuses to choose between providers. This mirrors what
+# `libvulkan1` itself declares, only as a hard dependency.
+depends = "$auto, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxcb1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-egl1, libegl1, libvulkan1, mesa-vulkan-drivers | vulkan-icd"
+
+# A font is a recommendation, not a requirement, matching what every
+# comparable package does — xterm, kitty and rxvt-unicode all depend on
+# `libfontconfig1` (a library they link; this app doesn't use fontconfig
+# at all, it scans the font directories directly) and none of them
+# requires a font package. rxvt-unicode's `Recommends: fonts-dejavu` is
+# the closest precedent and this follows it.
+#
+# It's here at all because the app really can't render without a font on
+# disk — it aborts in the text shaper — and apt installs recommendations
+# by default, so an ordinary install can't land in that state. Any machine
+# with a graphical session already has fonts, which is why forcing one
+# would be overreach.
+recommends = "fonts-dejavu-core"
 # The `.desktop` entry is what actually makes the app appear in a desktop
 # environment's application menu — without it, an `apt install`ed terminal
 # emulator can only be launched by typing its name into some *other*
@@ -80,3 +106,63 @@ assets = [
     ["../../assets/pain-256.png", "usr/share/icons/hicolor/256x256/apps/pain.png", "644"],
     ["../../assets/pain-512.png", "usr/share/icons/hicolor/512x512/apps/pain.png", "644"],
 ]
+
+# `cargo generate-rpm` reads this to build the .rpm. Same payload as the
+# .deb above, with Fedora's package names — the two families name almost
+# every one of these libraries differently, and the mapping is hand-checked
+# against a real Fedora image (see `Containerfile`'s `test-rpm` stage,
+# which installs the built package and starts the app for real).
+#
+# `auto-req = "builtin"` uses cargo-generate-rpm's own ELF scanner rather
+# than shelling out to rpm's `find-requires`, which means the .rpm can be
+# built on a Debian-family host with no rpm-build tooling at all — the
+# whole reason one container can produce both packages. It picks up the
+# libc/libgcc/libm links and their glibc symbol versions; everything below
+# is dlopen'd at runtime and invisible to any scanner, so it's listed by
+# hand exactly as in the .deb.
+[package.metadata.generate-rpm]
+auto-req = "builtin"
+assets = [
+    { source = "target/release/pain", dest = "/usr/bin/pain", mode = "755" },
+    { source = "../../README.md", dest = "/usr/share/doc/pain/README.md", mode = "644", doc = true },
+    { source = "../../man/pain.1", dest = "/usr/share/man/man1/pain.1", mode = "644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/pain/LICENSE", mode = "644", doc = true },
+    { source = "../../assets/pain.desktop", dest = "/usr/share/applications/pain.desktop", mode = "644" },
+    { source = "../../assets/pain.svg", dest = "/usr/share/icons/hicolor/scalable/apps/pain.svg", mode = "644" },
+    { source = "../../assets/pain-16.png", dest = "/usr/share/icons/hicolor/16x16/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-24.png", dest = "/usr/share/icons/hicolor/24x24/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-48.png", dest = "/usr/share/icons/hicolor/48x48/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-64.png", dest = "/usr/share/icons/hicolor/64x64/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-128.png", dest = "/usr/share/icons/hicolor/128x128/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/pain.png", mode = "644" },
+    { source = "../../assets/pain-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/pain.png", mode = "644" },
+]
+
+# `mesa-vulkan-drivers` is required outright here, where the .deb gets to
+# offer an alternation. Fedora has no `vulkan-icd`-style virtual package to
+# depend on instead — checked directly against a Fedora image, where that
+# package provides only itself and its sonames, and nothing at all provides
+# a generic vulkan-driver capability. Naming Mesa's driver outright is a
+# far smaller imposition here than the same thing would be on Debian:
+# Fedora Workstation installs it by default, it carries the software
+# fallback driver, and it coexists with the out-of-tree NVIDIA packages
+# rather than conflicting with them.
+[package.metadata.generate-rpm.requires]
+mesa-vulkan-drivers = "*"
+libX11 = "*"
+libX11-xcb = "*"
+libXcursor = "*"
+libXi = "*"
+libxcb = "*"
+libxkbcommon = "*"
+libxkbcommon-x11 = "*"
+libwayland-client = "*"
+libwayland-egl = "*"
+libglvnd-egl = "*"
+vulkan-loader = "*"
+
+# See the .deb's `recommends` above for why a font is recommended rather
+# than required. dnf installs weak dependencies by default too.
+[package.metadata.generate-rpm.recommends]
+dejavu-sans-mono-fonts = "*"

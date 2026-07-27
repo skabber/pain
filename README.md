@@ -52,9 +52,38 @@ open pain.app                    # hand it to macOS, same as double-clicking
 ./pain.app/Contents/MacOS/pain   # run the binary directly, to see log output
 ```
 
-### Windows and other Linux
+### Fedora / RHEL / Rocky / Alma
 
-Download the binary for your platform from [releases](../../releases).
+Add the DNF repository, for `dnf upgrade` support:
+
+```sh
+sudo dnf config-manager --add-repo https://w-p.github.io/pain/rpm/pain.repo
+sudo dnf install pain
+```
+
+### Any other Linux
+
+Download the AppImage — one file, no install, works on any distribution
+with glibc 2.35 or newer (including immutable ones like Silverblue,
+Kinoite, and Bazzite):
+
+```sh
+curl -fLO https://w-p.github.io/pain/appimage/pain-x86_64.AppImage
+chmod +x pain-x86_64.AppImage
+./pain-x86_64.AppImage
+```
+
+If it exits complaining about FUSE, your distribution doesn't ship
+libfuse2 — Fedora and Ubuntu 24.04 among them. Either install it, or run
+without it:
+
+```sh
+./pain-x86_64.AppImage --appimage-extract-and-run
+```
+
+### Windows
+
+Download the archive from [releases](../../releases).
 
 ## Usage
 
@@ -234,6 +263,46 @@ cargo build --release
 cargo test --workspace
 cargo run -p pain
 ```
+
+### Linux packages
+
+The `.deb`, `.rpm`, AppImage, and tarball are all produced from one compile
+inside a container, which pins the glibc floor at 2.35 rather than letting
+it drift upward with whatever the CI runner happens to be running. The same
+script CI uses runs locally, with either podman or docker:
+
+```sh
+./scripts/linux-packages.sh build    # artifacts into ./dist
+./scripts/linux-packages.sh verify   # install and start each one
+./scripts/linux-packages.sh all      # both
+```
+
+`verify` installs each package into a stock image of the distribution it
+targets and starts the application under a virtual display with software
+rendering. That last part matters: `--version` returns before the event loop
+starts, so it never reaches the X11, Wayland, xkbcommon, or Vulkan
+libraries — which are loaded at runtime and are exactly the dependencies
+most likely to be declared wrong.
+
+### Linux packages
+
+The `.deb`, `.rpm`, AppImage, and tarball are all built from one compile
+inside a container, which pins the glibc floor at 2.35 rather than letting
+it drift upward with whatever the CI runner happens to be running. The
+same script CI uses runs locally, with either podman or docker:
+
+```sh
+./scripts/linux-packages.sh build    # artifacts into ./dist
+./scripts/linux-packages.sh verify   # install and start each one
+./scripts/linux-packages.sh all      # both
+```
+
+`verify` installs each package into a stock image of the distribution it
+targets and starts the application under a virtual display with software
+rendering. That matters because `--version` returns before the event loop
+starts, so it never touches the X11, Wayland, xkbcommon, or Vulkan
+libraries — which are loaded at runtime and are exactly the dependencies
+most likely to be declared wrong.
 
 ## License
 

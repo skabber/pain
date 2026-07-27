@@ -6,14 +6,27 @@
 //! layered on top, the same technique real terminals with shell
 //! integration (iTerm2, Windows Terminal, VS Code) use.
 //!
-//! Deliberately narrow: only shells this can positively identify (bash,
-//! PowerShell, and `wsl.exe` when its own inner shell turns out to be
-//! bash) get anything injected. Everything else — cmd.exe (which needs a
-//! different, ConEmu-style `OSC 9;9` sequence instead of OSC 7, not
-//! implemented here), `wsl.exe` when its inner shell *isn't* bash (zsh,
-//! fish, ... — forcing one would risk silently changing what a user's WSL
-//! session actually runs), and any shell this doesn't recognize — spawns
-//! exactly as it did before this existed.
+//! **This is Windows-only in practice.** Unix reads a pane's working
+//! directory from the process table instead
+//! (`app::foreground_process::ForegroundProcesses::cwd_of`), which is
+//! simply a better answer: it needs no cooperation from the shell, so
+//! nothing has to be injected, nothing about the user's startup files
+//! changes, and it works for every shell rather than the two this module
+//! can recognize — zsh and fish panes get cwd tracking they never had.
+//!
+//! Injecting is the fallback for the platform with no such primitive.
+//! Reading another process's working directory on Windows means walking
+//! its PEB, and a WSL pane's shell lives in a process table the Windows
+//! side cannot see at all.
+//!
+//! Deliberately narrow even there: only shells this can positively
+//! identify (bash, PowerShell, and `wsl.exe` when its own inner shell
+//! turns out to be bash) get anything injected. Everything else —
+//! cmd.exe (which needs a different, ConEmu-style `OSC 9;9` sequence
+//! instead of OSC 7, not implemented here), `wsl.exe` when its inner
+//! shell *isn't* bash (zsh, fish, ... — forcing one would risk silently
+//! changing what a user's WSL session actually runs), and any shell this
+//! doesn't recognize — spawns exactly as it did before this existed.
 //!
 //! `Family::Wsl` is the one case that can't be decided at spawn time from
 //! the shell string alone: `wsl.exe` gives no indication up front of what
@@ -70,6 +83,25 @@ fn passwd_shell() -> Option<String> {
     shell.to_str().ok().map(str::to_string)
 }
 
+/// Whether `family` gets extra spawn arguments on this platform.
+///
+/// The caller needs this before building the command, not just when
+/// applying it: `CommandBuilder::new_default_prog()` panics outright if an
+/// argument is added to it, so a family that gets arguments has to be named
+/// explicitly instead. Kept beside `apply`, since the two have to agree.
+pub fn injects(family: Family) -> bool {
+    match family {
+        // See `apply` — Unix reads the working directory from the process
+        // table, so nothing is injected there at all. That includes
+        // PowerShell, which does run on Linux and macOS as `pwsh`.
+        Family::Bash | Family::PowerShell => cfg!(not(unix)),
+        // Windows-only by construction: there is no `wsl.exe` to classify
+        // anywhere else.
+        Family::Wsl => true,
+        Family::Other => false,
+    }
+}
+
 /// Identifies a shell by its executable's basename (`bash`, not
 /// `/usr/bin/bash` or `bash.exe`), so exact install path/extension
 /// differences don't matter. Splits on `/` and `\` manually rather than
@@ -97,6 +129,23 @@ pub fn classify(shell: &str) -> Family {
 /// any shell this doesn't recognize.
 pub fn apply(cmd: &mut CommandBuilder, family: Family) {
     match family {
+        // Nothing at all on Unix: the working directory is read straight
+        // out of the process table instead (`ForegroundProcesses::cwd_of`,
+        // `/proc/<pid>/cwd` on Linux and `proc_pidinfo` on macOS), so bash
+        // starts exactly as it would in any other terminal, reading its own
+        // startup files with no `--rcfile` in the way.
+        //
+        // That's a strictly better trade than it first appears. Injecting
+        // meant reproducing bash's startup-file logic by hand, and getting
+        // it wrong broke real configurations in ways that looked nothing
+        // like their cause. Reading the OS also works for every shell, so
+        // zsh and fish panes get working-directory tracking they never had.
+        //
+        // Windows has no equivalent — reading another process's cwd there
+        // means walking its PEB — so bash under Windows (Git Bash, MSYS)
+        // still gets the hook, as does WSL, whose shell lives in a process
+        // table the Windows side can't see at all.
+        Family::Bash if cfg!(unix) => {}
         Family::Bash => {
             let Some(path) = write_bash_integration() else { return };
             cmd.args(["--rcfile", &path.to_string_lossy()]);
@@ -238,20 +287,44 @@ esac
 }
 
 /// Passed to `bash --rcfile`, which otherwise replaces *all* of bash's own
-/// startup-file sourcing (not just `~/.bashrc`) — so this manually
-/// replicates what a plain interactive login shell would have read
-/// (`/etc/profile`, then the first of `.bash_profile`/`.bash_login`/
-/// `.profile` that exists), then `~/.bashrc` too, before adding the OSC 7
-/// hook. Appends to `PROMPT_COMMAND` rather than overwriting it, so a
-/// user's own `PROMPT_COMMAND` (set in any of the files above) still runs.
+/// startup-file sourcing — so this has to reproduce it by hand before
+/// adding the OSC 7 hook.
+///
+/// What it reproduces is an **interactive non-login shell**: the system
+/// bashrc, then `~/.bashrc`. That is what bash reads when a terminal
+/// emulator starts it, and what every other terminal on Linux does. The
+/// login files (`/etc/profile`, `~/.bash_profile`, `~/.bash_login`,
+/// `~/.profile`) are deliberately not sourced — a desktop session has
+/// already read those once, and a terminal is not a login.
+///
+/// This used to source the login chain as well, which broke real setups
+/// in a way that looked like "my `.bashrc` didn't load". The stock
+/// `~/.bash_profile` on Fedora and RHEL — and commonly on Debian and
+/// Ubuntu — ends with `[ -f ~/.bashrc ] && . ~/.bashrc`, so sourcing both
+/// chains ran `~/.bashrc` *twice*. Anything written to append rather than
+/// assign then did it twice too: duplicated `PATH` entries, duplicated
+/// `PROMPT_COMMAND`, and prompt frameworks (starship, bash-preexec,
+/// git-prompt) installing their hooks on top of themselves. It also ran
+/// login-only side effects — `ssh-agent` startup, tmux auto-attach — once
+/// per pane instead of once per login.
+///
+/// The system bashrc is `/etc/bash.bashrc` on Debian and Ubuntu but
+/// `/etc/bashrc` on Fedora, RHEL and macOS; bash itself is compiled with
+/// one path or the other, so at most one exists on any given system.
+/// Sourcing neither (which is what the old script effectively did on
+/// Fedora, where nothing in the login chain reaches `/etc/bashrc`) loses
+/// the system default prompt and the interactive half of
+/// `/etc/profile.d/*`.
+///
+/// Prepends to `PROMPT_COMMAND` rather than overwriting it, so a user's
+/// own hook still runs. Known limitation: bash 5.1 added an array form of
+/// `PROMPT_COMMAND`, and this string assignment only sees its first
+/// element.
 const BASH_INTEGRATION: &str = r#"
-[ -f /etc/profile ] && . /etc/profile
-if [ -f "$HOME/.bash_profile" ]; then
-    . "$HOME/.bash_profile"
-elif [ -f "$HOME/.bash_login" ]; then
-    . "$HOME/.bash_login"
-elif [ -f "$HOME/.profile" ]; then
-    . "$HOME/.profile"
+if [ -f /etc/bash.bashrc ]; then
+    . /etc/bash.bashrc
+elif [ -f /etc/bashrc ]; then
+    . /etc/bashrc
 fi
 [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 
@@ -286,6 +359,58 @@ Write-Host -NoNewline ([char]27 + ']9;9;' + $p + [char]27 + '\\'); \
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason the startup-file emulation above exists at all is that
+    /// `--rcfile` replaces it — so on the platform that no longer passes
+    /// `--rcfile`, bash must be getting no arguments whatsoever, and the
+    /// user's own startup files are read by bash itself.
+    #[test]
+    fn unix_injects_nothing_into_bash_and_windows_still_does() {
+        assert_eq!(injects(Family::Bash), cfg!(not(unix)));
+        // PowerShell runs on Linux and macOS too, as `pwsh`, and gets the
+        // same treatment there: nothing injected, cwd read from the OS.
+        assert_eq!(injects(Family::PowerShell), cfg!(not(unix)));
+        // Windows has no way to read another process's working directory
+        // short of walking its PEB, and a WSL pane's shell isn't in the
+        // Windows process table at all — that one always needs the hook.
+        assert!(injects(Family::Wsl));
+        assert!(!injects(Family::Other), "an unrecognized shell is never touched");
+    }
+
+    /// A terminal starts an interactive *non-login* shell, so the injected
+    /// rcfile must read the bashrc files and nothing else. Sourcing the
+    /// login chain on top is what made `~/.bashrc` run twice on any system
+    /// whose `~/.bash_profile` sources it — the stock arrangement on
+    /// Fedora and RHEL — duplicating `PATH` entries and prompt hooks.
+    /// Asserted rather than merely deleted, because "we stopped sourcing
+    /// these on purpose" reads like an oversight to the next person.
+    #[test]
+    fn the_bash_rcfile_reproduces_a_non_login_shell_and_nothing_more() {
+        assert!(BASH_INTEGRATION.contains(r#""$HOME/.bashrc""#), "must source the user's bashrc");
+        // Debian and Ubuntu use the first; Fedora, RHEL and macOS the
+        // second. Bash is compiled with one or the other, so both are
+        // tried and at most one will exist.
+        assert!(BASH_INTEGRATION.contains("/etc/bash.bashrc"), "must source Debian's system bashrc");
+        assert!(BASH_INTEGRATION.contains("/etc/bashrc"), "must source Fedora's system bashrc");
+
+        for login_file in ["/etc/profile", ".bash_profile", ".bash_login", ".profile"] {
+            assert!(
+                !BASH_INTEGRATION.contains(login_file),
+                "{login_file} is a login-shell file and must not be sourced by a terminal"
+            );
+        }
+    }
+
+    /// Overwriting `PROMPT_COMMAND` would silently disable whatever the
+    /// user's own configuration installed there — which on many setups is
+    /// what draws their prompt.
+    #[test]
+    fn the_bash_rcfile_keeps_any_existing_prompt_command() {
+        assert!(
+            BASH_INTEGRATION.contains(r#"PROMPT_COMMAND="__pain_report_cwd${PROMPT_COMMAND:+; $PROMPT_COMMAND}""#),
+            "the OSC 7 hook must be added to PROMPT_COMMAND, not assigned over it"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -337,16 +462,33 @@ mod tests {
         // fact that `Family::Other` never reaches either write/append arm.
     }
 
+    /// Unix must touch bash not at all; Windows must still get the hook,
+    /// since it has no way to read a process's working directory short of
+    /// walking its PEB.
+    ///
+    /// Deliberately removes any script left by an earlier run first. The
+    /// previous version of this test didn't, and kept passing after Unix
+    /// stopped writing the script at all — it was asserting the existence
+    /// of a stale file in the temp directory rather than anything this
+    /// call did.
     #[test]
-    fn apply_writes_the_bash_script_and_appends_rcfile_args() {
+    fn apply_injects_into_bash_only_where_the_os_cant_report_a_cwd() {
+        let script_path = bash_integration_path();
+        let _ = std::fs::remove_file(&script_path);
+
         let mut cmd = CommandBuilder::new("bash");
         apply(&mut cmd, Family::Bash);
+        let args: Vec<_> = cmd.get_argv().iter().skip(1).collect();
 
-        let script_path = bash_integration_path();
-        assert!(script_path.exists(), "should have written the integration script");
-        let contents = std::fs::read_to_string(&script_path).unwrap();
-        assert!(contents.contains("PROMPT_COMMAND"));
-        assert!(contents.contains(".bashrc"));
+        if cfg!(unix) {
+            assert!(args.is_empty(), "bash should start exactly as any other terminal starts it, got {args:?}");
+            assert!(!script_path.exists(), "nothing should be written when nothing is injected");
+        } else {
+            assert!(args.iter().any(|a| *a == "--rcfile"), "expected an --rcfile argument, got {args:?}");
+            let contents = std::fs::read_to_string(&script_path).expect("should have written the script");
+            assert!(contents.contains("PROMPT_COMMAND"));
+            assert!(contents.contains(".bashrc"));
+        }
     }
 
     #[test]

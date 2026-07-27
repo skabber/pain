@@ -1,11 +1,17 @@
 //! Resolves a pane's working directory for session save, falling back
 //! through progressively weaker signals (CONOPS §5g) when a stronger one
-//! isn't available: the shell's own OSC 7 report (`pane::Screen::cwd`,
-//! `crate::foreground_process::ForegroundProcesses::cwd_of`'s OS-level
-//! lookup if the shell never emitted one — not every configuration does —
-//! and finally the user's home directory if even that fails (the process
-//! already exited, or the OS doesn't expose this at all — weak on Windows
-//! in particular).
+//! isn't available: the shell's own OSC 7 report (`pane::Screen::cwd`),
+//! then `crate::foreground_process::ForegroundProcesses::cwd_of`'s
+//! OS-level lookup, and finally the user's home directory if even that
+//! fails (the process already exited, or the OS doesn't expose this).
+//!
+//! Which of the first two actually answers is a platform split. On Unix
+//! the OS-level lookup does all the real work — nothing injects OSC 7
+//! there any more (see `pane::integration`), so a report only arrives if
+//! the user's own shell configuration emits one, and it's honoured when it
+//! does because it's the shell's own logical path, symlinks and all. On
+//! Windows the OS-level lookup is the weak one, and injected OSC 7 (or
+//! `OSC 9;9`) is what usually answers.
 //!
 //! Not to be confused with `pane::cwd`, which is the OSC 7 *scanner*
 //! itself (parsing the escape sequence out of raw PTY bytes) — this is

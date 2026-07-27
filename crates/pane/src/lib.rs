@@ -31,6 +31,61 @@ fn default_shell_for_classification() -> Option<String> {
     None
 }
 
+/// Builds the command for a pane's shell, starting it the way the
+/// platform's own terminals start one.
+///
+/// Whether a shell is a *login* shell decides which startup files it
+/// reads, and the two platforms disagree. On Linux a graphical session has
+/// already read the profile files by the time you open a terminal, so
+/// terminals start an interactive **non-login** shell reading only the
+/// bashrc files — GNOME Terminal, Konsole, xterm and Alacritty all do.
+/// macOS GUI sessions never read them at all, so terminals there start a
+/// **login** shell instead; Terminal.app and iTerm2 both do, which is why
+/// a Mac user's `PATH` usually lives in `~/.bash_profile` or `~/.zprofile`.
+///
+/// This can't be left to `CommandBuilder::new_default_prog()`, which looks
+/// like the neutral choice and isn't: it sets `argv[0]` to `-bash`, the
+/// Unix convention for "this is a login shell". Using it for the
+/// unconfigured case and `CommandBuilder::new` for the configured one —
+/// which is what happened here once bash stopped being spawned explicitly
+/// — silently made shell type depend on whether the user had set
+/// `default_shell`, giving most Linux users a login shell.
+#[cfg(target_os = "macos")]
+fn shell_command(shell: Option<&str>, _resolved: Option<&str>) -> CommandBuilder {
+    match shell {
+        // `new_default_prog`'s `argv[0]` trick is the more faithful
+        // mechanism than passing `-l`, since a shell that doesn't know the
+        // flag still can't misinterpret the name it was invoked under.
+        None => CommandBuilder::new_default_prog(),
+        Some(shell) => {
+            let mut cmd = CommandBuilder::new(shell);
+            cmd.arg("-l");
+            cmd
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn shell_command(shell: Option<&str>, resolved: Option<&str>) -> CommandBuilder {
+    // Naming the shell explicitly is what keeps it non-login, so the
+    // resolved `$SHELL` is used even when the user configured nothing.
+    // Falling back to `new_default_prog` when even that fails would give a
+    // login shell, but there is nothing else left to spawn at that point.
+    match shell.or(resolved) {
+        Some(shell) => CommandBuilder::new(shell),
+        None => CommandBuilder::new_default_prog(),
+    }
+}
+
+#[cfg(not(unix))]
+fn shell_command(shell: Option<&str>, _resolved: Option<&str>) -> CommandBuilder {
+    // Windows has no login-shell concept to match.
+    match shell {
+        Some(shell) => CommandBuilder::new(shell),
+        None => CommandBuilder::new_default_prog(),
+    }
+}
+
 /// A spawned shell process behind a pseudo-terminal.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
@@ -65,20 +120,13 @@ impl Pty {
         let resolved = shell.map(str::to_string).or_else(default_shell_for_classification);
         let family = resolved.as_deref().map(integration::classify).unwrap_or(integration::Family::Other);
 
-        let mut cmd = match (shell, family) {
-            // A recognized family needs its own extra arguments, which
-            // `new_default_prog()` refuses outright (it panics if `arg`
-            // is called on it) — so even a shell resolved only from
-            // `$SHELL`, not named explicitly, has to be spawned
-            // explicitly here. The integration script manually replicates
-            // what a plain login shell would have sourced, so this
-            // doesn't lose the login-shell startup behavior
-            // `new_default_prog()` would otherwise have provided.
-            (_, integration::Family::Bash) | (_, integration::Family::PowerShell) => {
-                CommandBuilder::new(resolved.as_deref().expect("classified implies resolved"))
-            }
-            (Some(shell), _) => CommandBuilder::new(shell),
-            (None, _) => CommandBuilder::new_default_prog(),
+        let mut cmd = if integration::injects(family) {
+            // Anything getting injected arguments has to be named
+            // explicitly: `new_default_prog()` panics if an argument is
+            // added to it.
+            CommandBuilder::new(resolved.as_deref().expect("classified implies resolved"))
+        } else {
+            shell_command(shell, resolved.as_deref())
         };
         integration::apply(&mut cmd, family);
         Self::set_terminal_env(&mut cmd);
@@ -277,53 +325,98 @@ mod tests {
         assert!(seen.contains(&needle), "expected $PWD output to contain {needle:?}, got: {seen:?}");
     }
 
+    /// Shell type must not depend on whether the user happens to have set
+    /// `default_shell`. It silently did: naming the shell explicitly gives
+    /// a non-login shell, while `new_default_prog()` sets `argv[0]` to
+    /// `-bash` and gives a login one — so the same machine produced
+    /// different startup behaviour depending on a config key that has
+    /// nothing to do with it.
+    ///
+    /// Checked through `is_default_prog`, which is exactly the distinction
+    /// that was leaking.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_panes_are_non_login_whether_or_not_a_shell_is_configured() {
+        let configured = shell_command(Some("/bin/bash"), Some("/bin/bash"));
+        let unconfigured = shell_command(None, Some("/bin/bash"));
+
+        assert!(!configured.is_default_prog());
+        assert!(
+            !unconfigured.is_default_prog(),
+            "an unconfigured shell must still be named explicitly, or argv[0] makes it a login shell"
+        );
+    }
+
+    /// The mirror of the above: macOS terminals *do* start login shells,
+    /// so a configured shell has to be told to be one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_panes_are_login_shells_whether_or_not_a_shell_is_configured() {
+        let configured = shell_command(Some("/bin/bash"), Some("/bin/bash"));
+        assert!(
+            configured.get_argv().iter().any(|a| a == "-l"),
+            "a configured shell needs `-l` to be a login shell"
+        );
+        // Unconfigured relies on `new_default_prog`'s own `-bash` argv[0].
+        assert!(shell_command(None, Some("/bin/bash")).is_default_prog());
+    }
+
+    /// The behaviour the construction above is a proxy for, measured on a
+    /// real shell rather than inferred: `shopt -q login_shell` sets `$?`
+    /// to 0 for a login shell and 1 otherwise.
+    ///
+    /// Reads the status out of `$?` rather than echoing a marker word,
+    /// because the pty echoes the command itself — a probe printing
+    /// "IS_LOGIN" or "IS_NONLOGIN" matches both, in its own echo, before
+    /// the shell has answered anything.
     #[cfg(unix)]
     #[test]
-    fn bash_shell_integration_reports_cwd_via_osc7_with_no_manual_write() {
-        // The real end-to-end path: a genuine `bash` process, spawned
-        // through the actual `crate::integration` injection (not a
-        // hand-crafted OSC 7 sequence written by the test itself) — this
-        // is what actually has to work for session save's cwd tracking to
-        // mean anything on a real bash pane.
-        //
-        // Asserts only that *some* real absolute path gets reported, not
-        // that it's exactly the spawned-into directory: the integration
-        // script deliberately sources the real `~/.bashrc`/`.profile` (so
-        // a user's own customizations still apply), and that file is free
-        // to `cd` elsewhere itself — this repo's own dev machine's
-        // `~/.bashrc` does exactly that. `spawns_the_shell_in_the_given_
-        // starting_directory` (using `/bin/sh`, no dotfiles at all)
-        // already covers "the `cwd` argument is honored"; this test's job
-        // is only to prove the injected hook actually fires.
-        let dir = std::env::temp_dir();
-        let start_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-
-        let pty =
-            Pty::spawn(Some("bash"), Size { rows: 24, cols: 80 }, Some(&start_dir)).expect("spawn bash with a cwd");
+    fn a_real_bash_pane_matches_the_platforms_login_convention() {
+        let mut pty = Pty::spawn(Some("bash"), Size { rows: 24, cols: 80 }, None).expect("spawn bash");
         let mut reader = pty.try_clone_reader().expect("clone reader");
-        let mut screen = Screen::new(Size { rows: 24, cols: 80 });
+        pty.write(b"shopt -q login_shell; echo \"STATUS=$?\"\nexit\n").expect("write probe");
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            let mut all = Vec::new();
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                if n == 0 {
                     break;
                 }
+                all.extend_from_slice(&buf[..n]);
             }
+            let _ = tx.send(String::from_utf8_lossy(&all).into_owned());
         });
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while screen.cwd().is_none() {
-            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else { break };
-            match rx.recv_timeout(remaining) {
-                Ok(chunk) => screen.advance(&chunk),
-                Err(_) => break,
-            }
-        }
+        let output = rx.recv_timeout(Duration::from_secs(10)).expect("bash should have answered");
+        let expect_login = cfg!(target_os = "macos");
+        assert_eq!(
+            output.contains("STATUS=0"),
+            expect_login,
+            "expected login_shell={expect_login} on this platform, got: {output:?}"
+        );
+    }
 
-        let reported = screen.cwd().expect("the injected OSC 7 hook should have reported some cwd by now");
-        assert!(reported.is_absolute(), "expected an absolute path, got {reported:?}");
+    /// A real bash pane must now be spawned with **no arguments at all**,
+    /// so bash reads its own startup files exactly as it would in any
+    /// other terminal. Previously it got `--rcfile <generated script>`,
+    /// which suppressed all of them and made this module responsible for
+    /// reproducing bash's startup behaviour by hand — a responsibility it
+    /// got wrong, in ways that surfaced as users' prompts and colours
+    /// coming out mangled.
+    ///
+    /// Checked against the `CommandBuilder` rather than by spawning,
+    /// because "no argument was added" is the whole claim and a spawned
+    /// shell can't demonstrate the absence of one.
+    #[cfg(unix)]
+    #[test]
+    fn a_bash_pane_is_spawned_with_no_injected_arguments() {
+        let mut cmd = portable_pty::CommandBuilder::new("bash");
+        integration::apply(&mut cmd, integration::Family::Bash);
+
+        let args: Vec<_> = cmd.get_argv().iter().skip(1).collect();
+        assert!(args.is_empty(), "bash should be spawned exactly as the user's own terminal does, got {args:?}");
     }
 }
 
@@ -351,3 +444,4 @@ mod env_tests {
         assert_eq!(cmd.get_env("COLORTERM").and_then(|v| v.to_str()), Some("truecolor"));
     }
 }
+

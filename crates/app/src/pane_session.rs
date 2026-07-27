@@ -234,5 +234,49 @@ mod tests {
         }
 
         assert_eq!(cwd, expected, "pane's tracked cwd should follow a real `cd` typed into it");
+
+        // On Unix this has to be the process-table lookup doing the work,
+        // not a shell hook: nothing injects OSC 7 there any more, and the
+        // point of reading the OS directly is that no cooperation from the
+        // shell is required. If a report did arrive, the shell's own
+        // configuration emitted it, and this assertion is the wrong shape
+        // — but on a machine where that isn't happening, it's what stops
+        // this test quietly going back to proving the old mechanism.
+        #[cfg(unix)]
+        if session.screen().cwd().is_none() {
+            let os_level = session.shell_pid().and_then(|pid| processes.cwd_of(pid));
+            assert_eq!(
+                os_level.as_deref(),
+                Some(expected.as_path()),
+                "the OS-level lookup alone should have found it"
+            );
+        }
+    }
+
+    /// The capability that reading the OS bought us: a shell nothing was
+    /// ever injected into now tracks its working directory. `/bin/sh` is
+    /// used because it's guaranteed to exist, but the same is true of zsh
+    /// and fish, which had no cwd tracking at all before this.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_with_no_integration_still_tracks_its_working_directory() {
+        let dir = std::env::temp_dir();
+        let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+
+        let mut session =
+            PaneSession::spawn(Some("/bin/sh"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop())
+                .expect("spawn a real pane");
+        session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
+
+        let mut processes = crate::foreground_process::ForegroundProcesses::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut cwd = session.cwd(&mut processes);
+        while cwd != expected && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            session.pump();
+            cwd = session.cwd(&mut processes);
+        }
+
+        assert_eq!(cwd, expected, "an uninjected shell's cwd should be readable from the process table");
     }
 }

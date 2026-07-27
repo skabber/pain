@@ -24,7 +24,12 @@ impl PaneSession {
     /// Spawns `shell` (or the platform default when `None`) behind a PTY of
     /// `size`, starting in `cwd` if given (session restore), and starts a
     /// background thread reading its output.
-    pub fn spawn(shell: Option<&str>, size: pane::Size, cwd: Option<&std::path::Path>) -> anyhow::Result<Self> {
+    pub fn spawn(
+        shell: Option<&str>,
+        size: pane::Size,
+        cwd: Option<&std::path::Path>,
+        waker: crate::waker::Waker,
+    ) -> anyhow::Result<Self> {
         let pty = pane::Pty::spawn(shell, size, cwd)?;
         let mut reader = pty.try_clone_reader()?;
         let (tx, rx) = mpsc::channel();
@@ -55,6 +60,9 @@ impl PaneSession {
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break;
                         }
+                        // Nudge the event loop: it's asleep until
+                        // something happens, and this is the "something".
+                        waker.wake();
                     }
                 }
             }
@@ -76,9 +84,14 @@ impl PaneSession {
     }
 
     /// Applies any PTY output received since the last call.
-    pub fn pump(&mut self) {
+    /// Returns whether anything actually changed — i.e. whether a redraw
+    /// is warranted. The render loop only wakes the GPU when this (or
+    /// some other real change) says so; an idle pane must cost nothing.
+    pub fn pump(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(chunk) = self.rx.try_recv() {
             self.screen.advance(&chunk);
+            changed = true;
         }
 
         let writes = self.screen.take_pty_writes();
@@ -95,7 +108,10 @@ impl PaneSession {
                 eprintln!("pane: shell exited: {status}");
             }
             self.exit_logged = true;
+            changed = true;
         }
+
+        changed
     }
 
     pub fn screen(&self) -> &pane::Screen {
@@ -205,7 +221,7 @@ mod tests {
         let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
         let mut session =
-            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, None).expect("spawn a real pane");
+            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop()).expect("spawn a real pane");
         session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
 
         let mut processes = crate::foreground_process::ForegroundProcesses::new();

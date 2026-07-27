@@ -37,6 +37,14 @@ struct UrlHover {
     url: String,
 }
 
+/// What one `Graphics::poll` found: whether anything changed such that
+/// the screen needs repainting, and whether any panes are still open.
+#[derive(Debug, Clone, Copy)]
+pub struct PollOutcome {
+    pub needs_redraw: bool,
+    pub panes_remain: bool,
+}
+
 /// Drops `TEXT_COLOR`'s alpha channel, for use as a per-cell default color
 /// (`color::resolve`'s API works in bare RGB — alpha is always opaque for
 /// grid text, so there's nothing meaningful for a fourth channel to say).
@@ -169,6 +177,14 @@ pub struct Graphics {
     /// Shared, throttled process-list snapshot every pane's title bar reads
     /// from — see `crate::foreground_process`.
     foreground_processes: crate::foreground_process::ForegroundProcesses,
+    /// Handed to every PTY reader thread so output can wake the sleeping
+    /// event loop — see `crate::waker`.
+    waker: crate::waker::Waker,
+    /// The pane titles as of the last render. The foreground-process scan
+    /// runs on a timer, but a *scan* is not a *change*: comparing against
+    /// this is what stops a twice-a-second poll turning into a
+    /// twice-a-second repaint of an otherwise idle terminal.
+    last_titles: HashMap<PaneId, String>,
 }
 
 impl Graphics {
@@ -177,7 +193,11 @@ impl Graphics {
     /// saved cwds — never restarting whatever was running, CONOPS §5g), and
     /// group membership; `None` spawns a single shell into one pane filling
     /// the window, same as always.
-    pub fn new(window: Arc<Window>, session: Option<session::Session>) -> anyhow::Result<Self> {
+    pub fn new(
+        window: Arc<Window>,
+        session: Option<session::Session>,
+        waker: crate::waker::Waker,
+    ) -> anyhow::Result<Self> {
         let size = window.inner_size();
         // On Windows, a plain HWND-backed swapchain (DX12 or Vulkan alike)
         // only ever reports `CompositeAlphaMode::Opaque` — real per-pixel
@@ -224,6 +244,17 @@ impl Graphics {
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("adapter does not support this surface"))?;
+        // `get_default_config` picks `present_modes.first()`, which is
+        // whatever order the backend happens to advertise — and DX12
+        // lists `[Mailbox, Fifo]`, so Windows silently got **Mailbox**:
+        // present-newest-frame with no vsync throttle, meaning the GPU
+        // renders as fast as it physically can, forever. That's why a
+        // terminal was spinning fans up like a game. Metal lists Fifo
+        // first and so was never affected. Pinned explicitly rather than
+        // left to backend ordering: for a terminal, being capped to the
+        // display's refresh rate costs nothing anyone can perceive, and
+        // Mailbox's lower latency buys nothing here.
+        config.present_mode = wgpu::PresentMode::Fifo;
         // `PreMultiplied`: the compositor expects our stored color to
         // already be RGB×alpha (`render`'s pipeline produces exactly that —
         // see its `PREMULTIPLIED_ALPHA_BLENDING` blend state and `fs_main`'s
@@ -337,7 +368,7 @@ impl Graphics {
             // otherwise fall back to whatever the *current* configured
             // default is, same as a pane that's never been touched.
             let shell = state.as_ref().and_then(|s| s.shell.as_deref()).or_else(|| Self::shell(&settings));
-            match PaneSession::spawn(shell, root_size, cwd) {
+            match PaneSession::spawn(shell, root_size, cwd, waker.clone()) {
                 Ok(session) => {
                     panes.insert(*pane_id, session);
                     if let Some(group) = state.as_ref().and_then(|s| s.group.clone()) {
@@ -377,6 +408,8 @@ impl Graphics {
             config_reload_rx,
             _config_watcher,
             foreground_processes: crate::foreground_process::ForegroundProcesses::new(),
+            waker,
+            last_titles: HashMap::new(),
         };
         graphics.resize_panes_to_geometry();
         Ok(graphics)
@@ -708,7 +741,7 @@ impl Graphics {
             .rect;
         let size = Self::rect_to_size(Self::content_rect(rect, self.cell), self.cell);
 
-        match PaneSession::spawn(Self::shell(&self.settings), size, None) {
+        match PaneSession::spawn(Self::shell(&self.settings), size, None, self.waker.clone()) {
             Ok(session) => {
                 self.panes.insert(new_pane, session);
                 self.focused = new_pane;
@@ -747,7 +780,7 @@ impl Graphics {
         };
         let size = Self::rect_to_size(Self::content_rect(rect, self.cell), self.cell);
 
-        match PaneSession::spawn(shell, size, None) {
+        match PaneSession::spawn(shell, size, None, self.waker.clone()) {
             Ok(session) => {
                 // Replacing the map entry drops the old `PaneSession`,
                 // whose `Pty::drop` kills the old shell — no explicit kill
@@ -1264,7 +1297,20 @@ impl Graphics {
     /// exits on its own (the user typed `exit`, not an app-level close) is
     /// closed automatically here, same as an explicit close action; the
     /// caller should quit when the last one goes.
-    pub fn redraw(&mut self) -> bool {
+    /// Advances everything that isn't drawing: config reload, the
+    /// foreground-process scan, draining PTY output, and reaping panes
+    /// whose shell exited. Returns what the caller needs to decide what
+    /// to do next.
+    ///
+    /// Split out from `redraw` deliberately. The loop now sleeps instead
+    /// of spinning, so "has anything actually changed?" has to be
+    /// answerable *without* doing any GPU work — otherwise the only way
+    /// to find out would be to render, which is exactly the waste this
+    /// exists to avoid.
+    pub fn poll(&mut self) -> PollOutcome {
+        let mut outcome = PollOutcome { needs_redraw: false, panes_remain: true };
+
+        let settings_before = self.settings.clone();
         self.poll_config_reload();
         // Live-previews the settings panel's in-progress edits — applied
         // through the exact same path (`apply_settings`) a hot-reloaded
@@ -1294,18 +1340,73 @@ impl Graphics {
             }
         }
 
+        if self.settings != settings_before {
+            outcome.needs_redraw = true;
+        }
+
         let mut exited = Vec::new();
         for (pane, session) in self.panes.iter_mut() {
-            session.pump();
+            if session.pump() {
+                outcome.needs_redraw = true;
+            }
             if session.has_exited() {
                 exited.push(*pane);
             }
         }
         for pane in exited {
+            outcome.needs_redraw = true;
             if !self.close_pane(pane) {
-                return false;
+                outcome.panes_remain = false;
+                return outcome;
             }
         }
+
+        // A title only forces a repaint when it actually differs — the
+        // scan above runs on a timer regardless.
+        if self.refresh_titles() {
+            outcome.needs_redraw = true;
+        }
+
+        // Menus and the settings panel animate and respond to hover, so
+        // while any of them is open the UI drives its own repaints.
+        if self.ui.wants_keyboard_focus() {
+            outcome.needs_redraw = true;
+        }
+
+        outcome
+    }
+
+    /// Recomputes each pane's title and reports whether any changed.
+    fn refresh_titles(&mut self) -> bool {
+        let mut changed = false;
+        let mut seen: HashMap<PaneId, String> = HashMap::new();
+        for (pane, session) in &self.panes {
+            let name = self
+                .foreground_processes
+                .name_for(session.shell_pid(), session.foreground_pgid())
+                .unwrap_or_else(|| "shell".to_string());
+            if self.last_titles.get(pane) != Some(&name) {
+                changed = true;
+            }
+            seen.insert(*pane, name);
+        }
+        if seen.len() != self.last_titles.len() {
+            changed = true;
+        }
+        self.last_titles = seen;
+        changed
+    }
+
+    /// When the next foreground-process scan is due — the only periodic
+    /// work left, and therefore what decides how long the loop may sleep.
+    pub fn next_poll_deadline(&self) -> std::time::Instant {
+        self.foreground_processes.next_refresh_at()
+    }
+
+    /// Draws the current state. Assumes `poll` has already run; this does
+    /// GPU work unconditionally, so callers should only reach it when
+    /// something actually needs repainting.
+    pub fn redraw(&mut self) -> bool {
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)

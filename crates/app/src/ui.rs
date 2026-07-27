@@ -324,7 +324,9 @@ impl Ui {
                             // whole window instead of a compact ~240px
                             // menu — a real, confirmed bug (read via
                             // egui's own layout source), not a hunch.
-                            ui.set_width(240.0);
+                            let (width, max_height) = popup_bounds(&ctx, 240.0);
+                            ui.set_width(width);
+                            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
                             section_header(ui, "Broadcast");
                             // A horizontal radio row, not a vertical
                             // selectable-list: only one mode is ever active
@@ -503,6 +505,7 @@ impl Ui {
                                 settings_draft = Some(SettingsDraft::from_config(settings));
                                 close_after = true;
                             }
+                            });
                         });
                     });
             }
@@ -513,7 +516,9 @@ impl Ui {
                     .fixed_pos(pos)
                     .show(&ctx, |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_width(140.0);
+                            let (width, max_height) = popup_bounds(&ctx, 140.0);
+                            ui.set_width(width);
+                            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
                             if ui.button("Copy").clicked() {
                                 request.copy_selection = Some(pane);
                                 close_terminal_after = true;
@@ -527,6 +532,7 @@ impl Ui {
                                 request.close_pane = Some(pane);
                                 close_terminal_after = true;
                             }
+                            });
                         });
                     });
             }
@@ -542,7 +548,11 @@ impl Ui {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(&ctx, |ui| {
-                        ui.set_width(420.0);
+                        // Same reasoning as the menus: a fixed width
+                        // overflows once the app window is narrower than
+                        // it, and nothing can spill outside the window.
+                        let (dialog_width, _) = popup_bounds(&ctx, 420.0);
+                        ui.set_width(dialog_width);
                         section_header(ui, "This paste will run immediately");
                         ui.label(
                             "The program in this pane hasn't enabled bracketed paste, so every \
@@ -592,6 +602,10 @@ impl Ui {
                     .default_width(420.0)
                     .open(&mut still_open)
                     .show(&ctx, |ui| {
+                    // Bounded height so a short window can still scroll
+                    // to Save and Cancel instead of having them pushed
+                    // off the bottom with no way to get at them.
+                    ui.set_max_height(popup_bounds(&ctx, 420.0).1);
                     // Proportional, not pixel-fixed: a fraction of
                     // whatever the window's *actual current* width is,
                     // recomputed every frame, rather than hardcoded
@@ -943,6 +957,36 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
 }
 
+/// Sizes a popup menu to fit inside the window it's drawn in.
+///
+/// egui already keeps an `Area`'s *position* on screen (`constrain`
+/// defaults to true), but that can only slide a menu around — it can't
+/// help when the menu is simply taller or wider than the window, which is
+/// what happens once the window gets small. Nothing can render outside
+/// the window either: this all draws into the same wgpu surface, so
+/// anything past the edge is pixels that don't exist. So the menu has to
+/// actually shrink, and scroll for whatever still doesn't fit.
+///
+/// Returns `(width, max_height)`, both leaving a small margin so the menu
+/// never sits flush against the window edge.
+fn popup_bounds(ctx: &egui::Context, preferred_width: f32) -> (f32, f32) {
+    let screen = ctx.content_rect();
+    fit_popup(preferred_width, screen.width(), screen.height())
+}
+
+/// The sizing rule itself, split out from the egui lookup so it can be
+/// tested directly.
+fn fit_popup(preferred_width: f32, window_width: f32, window_height: f32) -> (f32, f32) {
+    const MARGIN: f32 = 12.0;
+    // Floors keep the popup usable rather than collapsing to nothing in a
+    // truly tiny window — past this point it scrolls instead.
+    const MIN_WIDTH: f32 = 140.0;
+    const MIN_HEIGHT: f32 = 80.0;
+    let width = preferred_width.min(window_width - MARGIN).max(MIN_WIDTH);
+    let max_height = (window_height - MARGIN).max(MIN_HEIGHT);
+    (width, max_height)
+}
+
 /// A right-aligned row of action buttons, explicitly bounded to a single
 /// row's height.
 ///
@@ -1139,4 +1183,39 @@ fn graphite_visuals(accent_rgb: [f32; 3]) -> egui::Visuals {
     visuals.slider_trailing_fill = true;
 
     visuals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_roomy_window_gets_the_preferred_width() {
+        let (w, h) = fit_popup(240.0, 1200.0, 800.0);
+        assert_eq!(w, 240.0);
+        assert_eq!(h, 788.0);
+    }
+
+    #[test]
+    fn a_narrow_window_shrinks_the_popup_to_fit() {
+        // The reported bug: the menu was wider than the window and simply
+        // got cut off, because nothing can draw outside the surface.
+        let (w, _) = fit_popup(240.0, 200.0, 800.0);
+        assert_eq!(w, 188.0, "should shrink to the window minus the margin");
+    }
+
+    #[test]
+    fn a_tiny_window_stops_shrinking_at_the_floor() {
+        // Below the floor the popup scrolls rather than collapsing into
+        // an unusable sliver.
+        let (w, h) = fit_popup(240.0, 40.0, 30.0);
+        assert_eq!(w, 140.0);
+        assert_eq!(h, 80.0);
+    }
+
+    #[test]
+    fn height_always_leaves_room_for_the_window_edge() {
+        let (_, h) = fit_popup(240.0, 1000.0, 500.0);
+        assert!(h < 500.0, "must not claim the full window height");
+    }
 }

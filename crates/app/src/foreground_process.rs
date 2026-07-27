@@ -65,6 +65,14 @@ impl ForegroundProcesses {
     /// last scan. Call once per frame; a cheap no-op most of the time.
     /// Returns whether a scan actually happened, so callers can log
     /// exactly when the snapshot changed instead of every single frame.
+    /// When the next scan becomes due. The event loop sleeps until this
+    /// instant, so it has to come from the same `last_refresh` the
+    /// throttle below uses — deriving it anywhere else would let the two
+    /// drift and either over-scan or stall pane titles.
+    pub fn next_refresh_at(&self) -> Instant {
+        self.last_refresh + REFRESH_INTERVAL
+    }
+
     pub fn maybe_refresh(&mut self) -> bool {
         if self.last_refresh.elapsed() >= REFRESH_INTERVAL {
             self.system.refresh_processes(ProcessesToUpdate::All, true);

@@ -3953,3 +3953,103 @@
   wrong this time. Re-ran it properly before reporting anything. Worth
   remembering: when a verification script disagrees with a build that
   passed its own in-CI assertions, suspect the script first.
+
+  **Update — 2026-07-26:** Developer reported the GPU spinning up "like a
+  game" on Windows, and pushed back on my initial staging ("this is a
+  terminal and should be super lightweight") — fairly, since I'd framed
+  the CPU-sleep fix as optional polish. Did all three properly.
+
+  **Three compounding causes, all confirmed by reading source:**
+  1. `Surface::get_default_config` picks `present_modes.first()`, and
+     wgpu-hal's DX12 backend advertises `[Mailbox, Fifo]` — so **Windows
+     silently ran Mailbox**: present-newest-frame, no vsync throttle, GPU
+     rendering flat out forever. Metal lists `[Fifo, Immediate]` and was
+     never affected, which is exactly why only Windows was reported.
+  2. `about_to_wait` called `request_redraw()` unconditionally every
+     iteration, so the full instance buffer was rebuilt, uploaded and
+     submitted every frame regardless of whether anything changed.
+  3. `ControlFlow::Poll` meant the loop never slept even between frames.
+
+  **Fixes:** pinned `PresentMode::Fifo`; split `Graphics::poll` (config
+  reload, foreground scan, PTY drain, pane reaping — returns
+  `PollOutcome { needs_redraw, panes_remain }`) out of `redraw` (pure GPU
+  work), so "did anything change?" is answerable without rendering to
+  find out; switched to `ControlFlow::WaitUntil` with the deadline driven
+  by the only remaining periodic work (the 500ms foreground-process
+  scan); and added `crate::waker::Waker` so PTY reader threads wake the
+  sleeping loop.
+
+  Two details worth keeping: the waker **coalesces** — an unguarded
+  `send_event` per read would have replaced a busy render loop with a
+  busy *event* loop under `yes`/large `cat`, since winit delivers every
+  proxy event. And titles are diffed rather than assumed dirty: the scan
+  runs on a timer, but a scan is not a change, so `refresh_titles`
+  compares against a cache — otherwise a twice-a-second poll would have
+  become a twice-a-second repaint. Used `()` as the user-event type so
+  no `EventLoop<T>` generic churn was needed.
+
+  **Measured, not assumed.** This sandbox renders via llvmpipe
+  (software), so drawing shows up as CPU — a sensitive detector. Idle
+  consumed **0.000s of CPU over 10s wall** (0.00% of a core). Separately
+  confirmed the timer still fires — `--verbose=foreground` showed 36
+  scan lines over ~7s across 3 panes (~1.7 scans/sec, matching the 500ms
+  interval), so pane titles stay current despite the loop sleeping.
+  59 app-crate tests (2 new for the coalescing guard), clippy clean,
+  Windows cross-target clean.
+
+  **Risk to flag on testing:** if the wake path were broken this would
+  present as a *frozen* terminal (output never appearing), not a subtle
+  regression. Startup rendering the shell prompt exercises that path, and
+  the app runs clean — but typing/output responsiveness needs real
+  interactive testing before release. Uncommitted.
+
+  **Update — 2026-07-27:** Developer confirmed the idle-cost work
+  ("that all appears to work") and reported menus being clipped by the
+  window edge in a small window, asking whether we could render outside
+  the window extents.
+
+  **Answered honestly: no.** egui draws into the same wgpu surface as the
+  grid — that surface *is* the window, so pixels past its edge don't
+  exist. Rendering beyond the window would need a separate OS-level
+  window (which is how native menus work). Noted but not pursued: winit
+  supports multiple windows and egui has multi-viewport, but it would
+  mean a second surface + egui context + focus/dismissal handling, and
+  **Wayland is a genuine blocker** — it has no global coordinates, so an
+  arbitrarily-positioned popup needs `xdg_popup`, which winit doesn't
+  expose usefully.
+
+  Checked the obvious in-window lever first and it was already correct:
+  `Area::constrain` defaults to `true` in egui 0.35, so position *was*
+  being clamped. That only slides a menu around though — useless when
+  the menu is simply taller than the window, which is what the
+  screenshot actually showed. The fix is to make it fit: new
+  `popup_bounds`/`fit_popup` shrinks to the window minus a margin (with
+  140x80 floors so it never collapses to a sliver) and wraps both context
+  menus in a height-bounded `ScrollArea`.
+
+  Applied the same treatment to the paste dialog (fixed 420px width) and
+  the settings panel (width was already proportional from an earlier
+  round, but a short window could push Save/Cancel off the bottom with no
+  way to reach them). Split `fit_popup` out from the egui lookup so the
+  sizing rule is testable without a context — 4 tests: roomy window keeps
+  the preferred width, narrow window shrinks, tiny window stops at the
+  floor, height always leaves room for the edge.
+
+  63 app-crate tests, clippy clean both targets, smoke clean.
+  Uncommitted alongside the idle-cost work.
+
+  **Update — 2026-07-27:** While writing up how to test the sleep/wake
+  work, spotted a real robustness hole in it. The waker re-armed only in
+  `user_event`, so a single dropped proxy event would leave `pending`
+  stuck `true`, the reader threads permanently silent, and the terminal
+  **frozen with no recovery**. Moved the re-arm into `about_to_wait`,
+  which runs on every wake *including the 500ms timer* — worst case is
+  now one timer interval of latency instead of a permanent hang.
+  `user_event` is now an empty handler that exists only to wake the loop.
+
+  Also worth recording for whoever tests this: **typing echoing back does
+  not prove the wake path works.** A keypress is a window event, which
+  drives a redraw on its own — so the shell's echo would appear even with
+  a completely broken waker. The decisive test is output arriving with no
+  input at all (`sleep 3; echo hi`): if that appears unprompted, the
+  reader thread genuinely woke the sleeping loop.

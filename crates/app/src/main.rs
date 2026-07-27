@@ -11,6 +11,7 @@ mod session_cwd;
 mod ui;
 mod url;
 mod verbose;
+mod waker;
 
 use std::sync::Arc;
 
@@ -44,13 +45,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     let event_loop = build_event_loop()?;
-    // Poll rather than wait: PTY output can arrive at any time, not just in
-    // response to a window event, so the frame needs to keep coming around
-    // to pick it up. A dedicated wake channel would avoid the busy loop, but
-    // that's an efficiency concern for later, not this de-risking milestone.
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // Sleep between events rather than spinning. PTY output arrives on
+    // background threads, which wake the loop through `waker::Waker`;
+    // everything else is already event-driven. `about_to_wait` sets the
+    // deadline for the one remaining piece of periodic work (the
+    // foreground-process scan that keeps pane titles current).
+    event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::default();
+    let mut app = App { waker: Some(waker::Waker::new(event_loop.create_proxy())), ..App::default() };
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -160,6 +162,9 @@ struct App {
     /// When and where the last left-press landed, and what click number it
     /// was — see `next_click_count`.
     last_click: Option<(std::time::Instant, (f32, f32), u32)>,
+    /// Wakes this loop when a PTY reader has output. `None` only before
+    /// `main` fills it in, which can't happen once running.
+    waker: Option<waker::Waker>,
 }
 
 /// How close together in time two presses must be to count as a
@@ -251,7 +256,8 @@ impl ApplicationHandler for App {
             }
         };
 
-        match Graphics::new(window, session) {
+        let waker = self.waker.clone().expect("waker is installed before the loop runs");
+        match Graphics::new(window, session, waker) {
             Ok(graphics) => {
                 graphics.window().request_redraw();
                 self.graphics = Some(graphics);
@@ -513,10 +519,37 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(graphics) = &self.graphics {
+    /// A PTY reader signalled that output is waiting. The draining and
+    /// the re-arm both happen in `about_to_wait`, which runs right after
+    /// this — see there for why the re-arm lives at that end.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {}
+
+    /// Runs after every batch of events and every timer expiry: advance
+    /// state, repaint only if that changed something, then decide how
+    /// long it's safe to sleep.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(graphics) = &mut self.graphics else { return };
+
+        // Re-arm here rather than in `user_event`, because this runs on
+        // *every* wake — including the periodic timer below. Re-arming
+        // only on the proxy event would mean a single dropped event left
+        // the flag stuck set, the readers permanently silent, and the
+        // terminal frozen with no way to recover. Doing it here bounds
+        // the worst case to one timer interval instead.
+        if let Some(waker) = &self.waker {
+            waker.clear();
+        }
+
+        let outcome = graphics.poll();
+        if !outcome.panes_remain {
+            graphics.save_session();
+            event_loop.exit();
+            return;
+        }
+        if outcome.needs_redraw {
             graphics.window().request_redraw();
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(graphics.next_poll_deadline()));
     }
 }
 

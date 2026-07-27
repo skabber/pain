@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Fixed: right-click menus, the settings panel, and the paste dialog were
+  cut off by the window edge when the window was small. They now shrink to
+  fit and scroll for whatever still doesn't, so every action stays
+  reachable at any window size.
+
+- Massively reduced resource use when idle. Three things were wrong:
+  on Windows the swapchain defaulted to a present mode with **no vsync
+  cap**, so the GPU rendered as fast as it physically could; the event
+  loop asked for a fresh frame on every iteration whether or not anything
+  had changed; and it never slept, so it spun the CPU continuously. The
+  loop now sleeps until something actually happens — PTY output wakes it
+  directly — and only repaints when the screen genuinely changed. An idle
+  terminal now measures at essentially zero CPU and does no GPU work at
+  all.
+
 ## v1.4.1
 
 - Fixed: shells were never told what terminal they were running in — `TERM`

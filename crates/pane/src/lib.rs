@@ -103,12 +103,7 @@ impl Pty {
     /// on its own — see `crate::integration`'s doc comment for how.
     pub fn spawn(shell: Option<&str>, size: Size, cwd: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair = pty_system.openpty(PtySize { rows: size.rows, cols: size.cols, pixel_width: 0, pixel_height: 0 })?;
 
         // An explicit `shell` always wins; `None` is resolved the same
         // way `portable_pty` itself would on Unix (`$SHELL`, then the
@@ -136,11 +131,7 @@ impl Pty {
         let child = pair.slave.spawn_command(cmd)?;
         let writer = pair.master.take_writer()?;
 
-        Ok(Self {
-            master: pair.master,
-            writer,
-            child,
-        })
+        Ok(Self { master: pair.master, writer, child })
     }
 
     /// Tells the child shell what kind of terminal it's talking to.
@@ -182,12 +173,7 @@ impl Pty {
 
     /// Resizes the underlying PTY, informing the shell of the new dimensions.
     pub fn resize(&self, size: Size) -> anyhow::Result<()> {
-        self.master.resize(PtySize {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        self.master.resize(PtySize { rows: size.rows, cols: size.cols, pixel_width: 0, pixel_height: 0 })?;
         Ok(())
     }
 
@@ -248,8 +234,7 @@ mod tests {
     fn spawns_shell_and_echoes_input() {
         let mut pty = Pty::spawn(None, Size { rows: 24, cols: 80 }, None).expect("spawn shell");
         let mut reader = pty.try_clone_reader().expect("clone reader");
-        pty.write(b"echo hello_pty_test\n")
-            .expect("write input to shell");
+        pty.write(b"echo hello_pty_test\n").expect("write input to shell");
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
@@ -267,13 +252,8 @@ mod tests {
             let _ = tx.send(seen);
         });
 
-        let output = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("shell produced no output within timeout");
-        assert!(
-            output.contains("hello_pty_test"),
-            "expected echoed output, got: {output:?}"
-        );
+        let output = rx.recv_timeout(Duration::from_secs(5)).expect("shell produced no output within timeout");
+        assert!(output.contains("hello_pty_test"), "expected echoed output, got: {output:?}");
     }
 
     #[cfg(unix)]
@@ -353,10 +333,7 @@ mod tests {
     #[test]
     fn macos_panes_are_login_shells_whether_or_not_a_shell_is_configured() {
         let configured = shell_command(Some("/bin/bash"), Some("/bin/bash"));
-        assert!(
-            configured.get_argv().iter().any(|a| a == "-l"),
-            "a configured shell needs `-l` to be a login shell"
-        );
+        assert!(configured.get_argv().iter().any(|a| a == "-l"), "a configured shell needs `-l` to be a login shell");
         // Unconfigured relies on `new_default_prog`'s own `-bash` argv[0].
         assert!(shell_command(None, Some("/bin/bash")).is_default_prog());
     }
@@ -444,4 +421,3 @@ mod env_tests {
         assert_eq!(cmd.get_env("COLORTERM").and_then(|v| v.to_str()), Some("truecolor"));
     }
 }
-

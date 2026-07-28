@@ -171,6 +171,10 @@ keeps the settings already loaded rather than resetting them. Individual
 bad
 .B [keybindings]
 lines are skipped one at a time, not treated as poisoning the whole table.
+Numeric settings are clamped to the ranges documented below, with a note on
+standard error saying what changed \(em an out-of-range value is used at the
+nearest end of its range, and a value that is not a number at all falls back
+to its default.
 .SS [general]
 .TP
 .B default_shell
@@ -181,8 +185,11 @@ on Unix, and the configured default shell on Windows.
 .TP
 .B scrollback_lines
 Integer, default
-.BR 5000 .
-Lines of history kept per pane.
+.BR 5000 ,
+maximum
+.BR 1000000 .
+Lines of history kept per pane. Changing it applies to panes that are
+already open, not just new ones.
 .TP
 .B confirm_multiline_paste
 Boolean, default
@@ -206,7 +213,11 @@ Any installed monospaced family. The settings panel lists what is
 available.
 .TP
 .B font_size
-Number, default
+Number from
+.B 6
+to
+.BR 48 ,
+default
 .BR 13 .
 Scaled by the display's DPI factor, so this is a logical size and matches
 other applications on a scaled display rather than being raw pixels.

@@ -90,12 +90,7 @@ impl Layout {
     /// Creates a layout with a single pane filling the whole area.
     pub fn new() -> (Self, PaneId) {
         let id = PaneId(0);
-        let layout = Self {
-            root: Node::Leaf(id),
-            next_pane_id: 1,
-            next_split_id: 0,
-            zoomed: None,
-        };
+        let layout = Self { root: Node::Leaf(id), next_pane_id: 1, next_split_id: 0, zoomed: None };
         (layout, id)
     }
 
@@ -235,7 +230,9 @@ impl Layout {
     fn contains_pane(node: &Node, target: PaneId) -> bool {
         match node {
             Node::Leaf(id) => *id == target,
-            Node::Split { first, second, .. } => Self::contains_pane(first, target) || Self::contains_pane(second, target),
+            Node::Split { first, second, .. } => {
+                Self::contains_pane(first, target) || Self::contains_pane(second, target)
+            }
         }
     }
 
@@ -292,13 +289,7 @@ impl Layout {
     fn resize_node(node: &mut Node, target: SplitId, delta: f32) -> bool {
         match node {
             Node::Leaf(_) => false,
-            Node::Split {
-                id,
-                ratio,
-                first,
-                second,
-                ..
-            } => {
+            Node::Split { id, ratio, first, second, .. } => {
                 if *id == target {
                     *ratio = (*ratio + delta).clamp(MIN_RATIO, MAX_RATIO);
                     true
@@ -326,13 +317,7 @@ impl Layout {
     fn resize_target_node(node: &Node, target: PaneId, wanted: Orientation) -> Option<(SplitId, bool)> {
         match node {
             Node::Leaf(_) => None,
-            Node::Split {
-                id,
-                orientation,
-                first,
-                second,
-                ..
-            } => {
+            Node::Split { id, orientation, first, second, .. } => {
                 let in_first = Self::contains_node(first, target);
                 let in_second = !in_first && Self::contains_node(second, target);
                 if (in_first || in_second) && *orientation == wanted {
@@ -383,10 +368,7 @@ impl Layout {
     /// zoomed, its rect is `area` and there are no dividers.
     pub fn geometry(&self, area: Rect, divider_thickness: f32) -> Geometry {
         if let Some(zoomed) = self.zoomed {
-            return Geometry {
-                panes: vec![PaneRect { pane: zoomed, rect: area }],
-                dividers: vec![],
-            };
+            return Geometry { panes: vec![PaneRect { pane: zoomed, rect: area }], dividers: vec![] };
         }
         geometry::compute(&self.root, area, divider_thickness)
     }
@@ -458,7 +440,12 @@ impl Layout {
         (layout, panes)
     }
 
-    fn build_node(snapshot: &SavedNode, next_pane_id: &mut u64, next_split_id: &mut u64, panes: &mut Vec<PaneId>) -> Node {
+    fn build_node(
+        snapshot: &SavedNode,
+        next_pane_id: &mut u64,
+        next_split_id: &mut u64,
+        panes: &mut Vec<PaneId>,
+    ) -> Node {
         match snapshot {
             SavedNode::Leaf => {
                 let id = PaneId(*next_pane_id);
@@ -657,7 +644,10 @@ mod tests {
         let after = layout.geometry(area, 0.0);
         assert_eq!(after.panes.len(), 3);
         for pane in &after.panes {
-            assert!((pane.rect.width - 400.0).abs() < 0.001, "expected all three survivors at a third each, got {pane:?}");
+            assert!(
+                (pane.rect.width - 400.0).abs() < 0.001,
+                "expected all three survivors at a third each, got {pane:?}"
+            );
         }
     }
 
@@ -679,7 +669,8 @@ mod tests {
         assert!(layout.resize(stack_split, 0.2)); // move the vertical divider off center
 
         let area = Rect { x: 0.0, y: 0.0, width: 1000.0, height: 1000.0 };
-        let before_bottom_height = layout.geometry(area, 0.0).panes.iter().find(|p| p.pane == bottom).unwrap().rect.height;
+        let before_bottom_height =
+            layout.geometry(area, 0.0).panes.iter().find(|p| p.pane == bottom).unwrap().rect.height;
 
         assert!(layout.close(left));
 
@@ -913,10 +904,8 @@ mod tests {
         let geometry = arranged.geometry(area, 0.0);
         assert_eq!(geometry.panes.len(), 3);
 
-        let full_width_panes =
-            geometry.panes.iter().filter(|p| (p.rect.width - 200.0).abs() < 0.01).count();
-        let half_width_panes =
-            geometry.panes.iter().filter(|p| (p.rect.width - 100.0).abs() < 0.01).count();
+        let full_width_panes = geometry.panes.iter().filter(|p| (p.rect.width - 200.0).abs() < 0.01).count();
+        let half_width_panes = geometry.panes.iter().filter(|p| (p.rect.width - 100.0).abs() < 0.01).count();
         assert_eq!(full_width_panes, 1, "the shorter last row's one pane should span the full width");
         assert_eq!(half_width_panes, 2, "the first row's two panes should split its width evenly");
     }

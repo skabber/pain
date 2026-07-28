@@ -134,7 +134,9 @@ impl ForegroundProcesses {
             .system
             .processes()
             .values()
-            .filter(|p| p.parent() == Some(current) && !is_console_host_implementation_detail(&p.name().to_string_lossy()))
+            .filter(|p| {
+                p.parent() == Some(current) && !is_console_host_implementation_detail(&p.name().to_string_lossy())
+            })
             .max_by_key(|p| p.start_time())
         {
             current = youngest_child.pid();
@@ -189,10 +191,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn name_for_falls_back_to_the_shells_own_name_when_idle() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("5")
-            .spawn()
-            .expect("spawn a real child process to look up");
+        let mut child =
+            std::process::Command::new("sleep").arg("5").spawn().expect("spawn a real child process to look up");
 
         let mut processes = ForegroundProcesses::new();
         processes.system.refresh_processes(ProcessesToUpdate::All, true);
@@ -240,8 +240,8 @@ mod tests {
         // fixed delay below isn't enough time for it — not a bug in the
         // injection itself, just irrelevant overhead for what this test
         // actually checks.
-        let mut pty = pane::Pty::spawn(Some("sh"), pane::Size { rows: 24, cols: 80 }, None)
-            .expect("spawn a real shell");
+        let mut pty =
+            pane::Pty::spawn(Some("sh"), pane::Size { rows: 24, cols: 80 }, None).expect("spawn a real shell");
         pty.write(b"sleep 5\n").expect("write to the shell");
 
         // Give the shell a moment to actually exec into `sleep` and become
@@ -288,8 +288,8 @@ mod tests {
         // `"sh"`, not `None` — see the comment on
         // `real_pty_reports_the_actual_foreground_command`, the same
         // reasoning applies here.
-        let mut pty = pane::Pty::spawn(Some("sh"), pane::Size { rows: 24, cols: 80 }, None)
-            .expect("spawn a real shell");
+        let mut pty =
+            pane::Pty::spawn(Some("sh"), pane::Size { rows: 24, cols: 80 }, None).expect("spawn a real shell");
         pty.write(b"htop\n").expect("write to the shell");
         std::thread::sleep(std::time::Duration::from_millis(500));
 

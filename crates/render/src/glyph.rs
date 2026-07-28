@@ -25,10 +25,7 @@ pub struct GlyphRasterizer {
 
 impl GlyphRasterizer {
     pub fn new() -> Self {
-        Self {
-            font_system: FontSystem::new(),
-            swash_cache: SwashCache::new(),
-        }
+        Self { font_system: FontSystem::new(), swash_cache: SwashCache::new() }
     }
 
     /// Returns the advance width of `c` at `size_px` in `family` — for a
@@ -56,10 +53,7 @@ impl GlyphRasterizer {
         let run = buffer.layout_runs().next()?;
         let glyph = run.glyphs.first()?;
         let physical = glyph.physical((0.0, 0.0), 1.0);
-        let image = self
-            .swash_cache
-            .get_image(&mut self.font_system, physical.cache_key)
-            .as_ref()?;
+        let image = self.swash_cache.get_image(&mut self.font_system, physical.cache_key).as_ref()?;
 
         if image.placement.width == 0 || image.placement.height == 0 {
             return None;
@@ -69,9 +63,7 @@ impl GlyphRasterizer {
             SwashContent::Mask => image.data.clone(),
             // Color glyphs (emoji) are out of scope for v1's monospace grid;
             // fall back to the alpha channel so they at least render as a shape.
-            SwashContent::Color | SwashContent::SubpixelMask => {
-                image.data.chunks_exact(4).map(|px| px[3]).collect()
-            }
+            SwashContent::Color | SwashContent::SubpixelMask => image.data.chunks_exact(4).map(|px| px[3]).collect(),
         };
 
         Some(RasterizedGlyph {
@@ -96,11 +88,7 @@ impl Default for GlyphRasterizer {
 /// name both resolve the same way, rather than an empty string failing to
 /// match any real font.
 fn family_attr(name: &str) -> Family<'_> {
-    if name.is_empty() || name.eq_ignore_ascii_case("monospace") {
-        Family::Monospace
-    } else {
-        Family::Name(name)
-    }
+    if name.is_empty() || name.eq_ignore_ascii_case("monospace") { Family::Monospace } else { Family::Name(name) }
 }
 
 /// Every monospaced font family installed on the system, deduplicated and
@@ -174,9 +162,7 @@ mod tests {
     #[test]
     fn rasterizes_a_visible_character() {
         let mut rasterizer = GlyphRasterizer::new();
-        let glyph = rasterizer
-            .rasterize('A', 16.0, "")
-            .expect("'A' should rasterize to a visible glyph");
+        let glyph = rasterizer.rasterize('A', 16.0, "").expect("'A' should rasterize to a visible glyph");
 
         assert!(glyph.width > 0);
         assert!(glyph.height > 0);

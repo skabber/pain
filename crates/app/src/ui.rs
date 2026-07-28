@@ -114,9 +114,13 @@ fn effective_binding_rows(overrides: &BTreeMap<String, String>) -> Vec<BindingRo
         })
         .collect();
 
-    rows.extend(defaults.bindings().into_iter().filter(|(chord, _)| effective.lookup(*chord).is_none()).map(
-        |(chord, _)| BindingRow { chord: chord.to_string(), action: "(unbound)".to_string(), custom: true },
-    ));
+    rows.extend(
+        defaults
+            .bindings()
+            .into_iter()
+            .filter(|(chord, _)| effective.lookup(*chord).is_none())
+            .map(|(chord, _)| BindingRow { chord: chord.to_string(), action: "(unbound)".to_string(), custom: true }),
+    );
 
     rows.sort_by(|a, b| a.chord.cmp(&b.chord));
     rows
@@ -379,8 +383,7 @@ impl Ui {
         // way as everything above. The cache isn't about speed — see the
         // field's own comment for why recomputing every frame is harmful.
         if self.binding_rows.as_ref().is_none_or(|(cached, _)| *cached != settings.keybindings) {
-            self.binding_rows =
-                Some((settings.keybindings.clone(), effective_binding_rows(&settings.keybindings)));
+            self.binding_rows = Some((settings.keybindings.clone(), effective_binding_rows(&settings.keybindings)));
         }
         let binding_rows = self.binding_rows.take();
         let rows: &[BindingRow] = binding_rows.as_ref().map_or(&[], |(_, rows)| rows.as_slice());
@@ -401,10 +404,9 @@ impl Ui {
             if let Some((pane, pos)) = context_menu {
                 let pane_group = current_group(pane);
                 let accent_color32 = color32_from_rgb(settings.appearance.accent_rgb());
-                egui::Area::new(egui::Id::new("pane-context-menu"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(pos)
-                    .show(&ctx, |ui| {
+                egui::Area::new(egui::Id::new("pane-context-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(
+                    &ctx,
+                    |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             // A fixed width, not just a minimum: `Area`
                             // doesn't otherwise bound how much horizontal
@@ -431,187 +433,204 @@ impl Ui {
                             // the window genuinely can't fit it.
                             ui.set_max_height(max_height);
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                            section_header(ui, "Broadcast");
-                            // A horizontal radio row, not a vertical
-                            // selectable-list: only one mode is ever active
-                            // at once, which a radio group communicates
-                            // more directly than a list of individually
-                            // clickable pills.
-                            ui.horizontal(|ui| {
-                                for (mode, label) in [
-                                    (BroadcastMode::Off, "Off"),
-                                    (BroadcastMode::Group, "Group"),
-                                    (BroadcastMode::All, "All"),
-                                ] {
-                                    let active = broadcast_mode == mode;
-                                    // The active mode's label itself turns
-                                    // accent-colored, not just its dot —
-                                    // matching the mockup's `.radio.active`
-                                    // rule (`override_text_color` would
-                                    // otherwise force every label to the
-                                    // same ink color regardless of state).
-                                    let text = egui::RichText::new(label).color(if active { accent_color32 } else { MUTED });
-                                    if ui.radio(active, text).clicked() {
-                                        request.set_broadcast_mode = Some(mode);
+                                section_header(ui, "Broadcast");
+                                // A horizontal radio row, not a vertical
+                                // selectable-list: only one mode is ever active
+                                // at once, which a radio group communicates
+                                // more directly than a list of individually
+                                // clickable pills.
+                                ui.horizontal(|ui| {
+                                    for (mode, label) in [
+                                        (BroadcastMode::Off, "Off"),
+                                        (BroadcastMode::Group, "Group"),
+                                        (BroadcastMode::All, "All"),
+                                    ] {
+                                        let active = broadcast_mode == mode;
+                                        // The active mode's label itself turns
+                                        // accent-colored, not just its dot —
+                                        // matching the mockup's `.radio.active`
+                                        // rule (`override_text_color` would
+                                        // otherwise force every label to the
+                                        // same ink color regardless of state).
+                                        let text = egui::RichText::new(label).color(if active {
+                                            accent_color32
+                                        } else {
+                                            MUTED
+                                        });
+                                        if ui.radio(active, text).clicked() {
+                                            request.set_broadcast_mode = Some(mode);
+                                            close_after = true;
+                                        }
+                                    }
+                                });
+
+                                ui.separator();
+                                section_header(ui, "Split");
+                                ui.columns(2, |cols| {
+                                    if cols[0]
+                                        .add_sized([cols[0].available_width(), 0.0], egui::Button::new("Horizontal"))
+                                        .clicked()
+                                    {
+                                        request.split = Some((pane, Orientation::Horizontal));
+                                        close_after = true;
+                                    }
+                                    if cols[1]
+                                        .add_sized([cols[1].available_width(), 0.0], egui::Button::new("Vertical"))
+                                        .clicked()
+                                    {
+                                        request.split = Some((pane, Orientation::Vertical));
+                                        close_after = true;
+                                    }
+                                });
+
+                                ui.separator();
+                                section_header(ui, "Arrange all panes");
+                                ui.columns(3, |cols| {
+                                    if cols[0]
+                                        .add_sized([cols[0].available_width(), 0.0], egui::Button::new("Horizontal"))
+                                        .clicked()
+                                    {
+                                        request.arrange = Some(Arrangement::Horizontal);
+                                        close_after = true;
+                                    }
+                                    if cols[1]
+                                        .add_sized([cols[1].available_width(), 0.0], egui::Button::new("Vertical"))
+                                        .clicked()
+                                    {
+                                        request.arrange = Some(Arrangement::Vertical);
+                                        close_after = true;
+                                    }
+                                    if cols[2]
+                                        .add_sized([cols[2].available_width(), 0.0], egui::Button::new("Grid"))
+                                        .clicked()
+                                    {
+                                        request.arrange = Some(Arrangement::Grid);
+                                        close_after = true;
+                                    }
+                                });
+
+                                ui.separator();
+                                section_header(ui, "Group");
+                                if let Some(name) = &pane_group {
+                                    ui.horizontal(|ui| {
+                                        ui.label("In group");
+                                        ui.label(egui::RichText::new(name).strong());
+                                    });
+                                    if ui.button("Remove from group").clicked() {
+                                        request.remove_from_group = Some(pane);
                                         close_after = true;
                                     }
                                 }
-                            });
-
-                            ui.separator();
-                            section_header(ui, "Split");
-                            ui.columns(2, |cols| {
-                                if cols[0]
-                                    .add_sized([cols[0].available_width(), 0.0], egui::Button::new("Horizontal"))
-                                    .clicked()
-                                {
-                                    request.split = Some((pane, Orientation::Horizontal));
-                                    close_after = true;
-                                }
-                                if cols[1]
-                                    .add_sized([cols[1].available_width(), 0.0], egui::Button::new("Vertical"))
-                                    .clicked()
-                                {
-                                    request.split = Some((pane, Orientation::Vertical));
-                                    close_after = true;
-                                }
-                            });
-
-                            ui.separator();
-                            section_header(ui, "Arrange all panes");
-                            ui.columns(3, |cols| {
-                                if cols[0]
-                                    .add_sized([cols[0].available_width(), 0.0], egui::Button::new("Horizontal"))
-                                    .clicked()
-                                {
-                                    request.arrange = Some(Arrangement::Horizontal);
-                                    close_after = true;
-                                }
-                                if cols[1]
-                                    .add_sized([cols[1].available_width(), 0.0], egui::Button::new("Vertical"))
-                                    .clicked()
-                                {
-                                    request.arrange = Some(Arrangement::Vertical);
-                                    close_after = true;
-                                }
-                                if cols[2].add_sized([cols[2].available_width(), 0.0], egui::Button::new("Grid")).clicked()
-                                {
-                                    request.arrange = Some(Arrangement::Grid);
-                                    close_after = true;
-                                }
-                            });
-
-                            ui.separator();
-                            section_header(ui, "Group");
-                            if let Some(name) = &pane_group {
                                 ui.horizontal(|ui| {
-                                    ui.label("In group");
-                                    ui.label(egui::RichText::new(name).strong());
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut group_name_input)
+                                            .hint_text("New group name")
+                                            .desired_width(120.0),
+                                    );
+                                    let name = group_name_input.trim();
+                                    if ui.add_enabled(!name.is_empty(), egui::Button::new("Add")).clicked() {
+                                        request.assign_to_group = Some((pane, name.to_string()));
+                                        close_after = true;
+                                    }
                                 });
-                                if ui.button("Remove from group").clicked() {
-                                    request.remove_from_group = Some(pane);
-                                    close_after = true;
-                                }
-                            }
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut group_name_input)
-                                        .hint_text("New group name")
-                                        .desired_width(120.0),
-                                );
-                                let name = group_name_input.trim();
-                                if ui.add_enabled(!name.is_empty(), egui::Button::new("Add")).clicked() {
-                                    request.assign_to_group = Some((pane, name.to_string()));
-                                    close_after = true;
-                                }
-                            });
-                            if !group_names.is_empty() {
-                                egui::ComboBox::from_label("Existing group")
-                                    .selected_text("Choose...")
-                                    .show_ui(ui, |ui| {
-                                        for name in group_names {
-                                            if ui.selectable_label(false, *name).clicked() {
-                                                request.assign_to_group = Some((pane, (*name).to_string()));
-                                                close_after = true;
+                                if !group_names.is_empty() {
+                                    egui::ComboBox::from_label("Existing group").selected_text("Choose...").show_ui(
+                                        ui,
+                                        |ui| {
+                                            for name in group_names {
+                                                if ui.selectable_label(false, *name).clicked() {
+                                                    request.assign_to_group = Some((pane, (*name).to_string()));
+                                                    close_after = true;
+                                                }
                                             }
+                                        },
+                                    );
+                                }
+
+                                ui.separator();
+                                section_header(ui, "Swap shell");
+                                // Windows-only quick picks, same three presets
+                                // (and the same rationale — no single obvious
+                                // default the way Unix has `$SHELL`) as the
+                                // settings panel's "Quick pick" row below.
+                                // Unlike that row, picking one here acts
+                                // immediately instead of filling a draft field
+                                // for a separate Save step — this menu has no
+                                // "cancel" concept, so there's nothing to
+                                // stage.
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let mut clicked_shell = None;
+                                    ui.columns(3, |cols| {
+                                        if cols[0]
+                                            .add_sized([cols[0].available_width(), 0.0], egui::Button::new("cmd"))
+                                            .clicked()
+                                        {
+                                            clicked_shell = Some("cmd.exe");
+                                        }
+                                        if cols[1]
+                                            .add_sized(
+                                                [cols[1].available_width(), 0.0],
+                                                egui::Button::new("PowerShell"),
+                                            )
+                                            .clicked()
+                                        {
+                                            clicked_shell = Some("powershell.exe");
+                                        }
+                                        if cols[2]
+                                            .add_sized([cols[2].available_width(), 0.0], egui::Button::new("WSL"))
+                                            .clicked()
+                                        {
+                                            clicked_shell = Some("wsl.exe");
                                         }
                                     });
-                            }
-
-                            ui.separator();
-                            section_header(ui, "Swap shell");
-                            // Windows-only quick picks, same three presets
-                            // (and the same rationale — no single obvious
-                            // default the way Unix has `$SHELL`) as the
-                            // settings panel's "Quick pick" row below.
-                            // Unlike that row, picking one here acts
-                            // immediately instead of filling a draft field
-                            // for a separate Save step — this menu has no
-                            // "cancel" concept, so there's nothing to
-                            // stage.
-                            #[cfg(target_os = "windows")]
-                            {
-                                let mut clicked_shell = None;
-                                ui.columns(3, |cols| {
-                                    if cols[0].add_sized([cols[0].available_width(), 0.0], egui::Button::new("cmd")).clicked() {
-                                        clicked_shell = Some("cmd.exe");
+                                    if let Some(shell) = clicked_shell {
+                                        request.restart_shell = Some((pane, Some(shell.to_string())));
+                                        close_after = true;
                                     }
-                                    if cols[1]
-                                        .add_sized([cols[1].available_width(), 0.0], egui::Button::new("PowerShell"))
-                                        .clicked()
-                                    {
-                                        clicked_shell = Some("powershell.exe");
-                                    }
-                                    if cols[2].add_sized([cols[2].available_width(), 0.0], egui::Button::new("WSL")).clicked() {
-                                        clicked_shell = Some("wsl.exe");
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut swap_shell_input)
+                                            .hint_text("(platform default)")
+                                            .desired_width(120.0),
+                                    );
+                                    let shell = swap_shell_input.trim();
+                                    let label = if shell.is_empty() { "Restart" } else { "Swap" };
+                                    if ui.button(label).clicked() {
+                                        let shell = (!shell.is_empty()).then(|| shell.to_string());
+                                        request.restart_shell = Some((pane, shell));
+                                        close_after = true;
                                     }
                                 });
-                                if let Some(shell) = clicked_shell {
-                                    request.restart_shell = Some((pane, Some(shell.to_string())));
+
+                                ui.separator();
+                                section_header(ui, "Pane");
+                                if ui.button("Close").clicked() {
+                                    request.close_pane = Some(pane);
                                     close_after = true;
                                 }
-                            }
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut swap_shell_input)
-                                        .hint_text("(platform default)")
-                                        .desired_width(120.0),
-                                );
-                                let shell = swap_shell_input.trim();
-                                let label = if shell.is_empty() { "Restart" } else { "Swap" };
-                                if ui.button(label).clicked() {
-                                    let shell = (!shell.is_empty()).then(|| shell.to_string());
-                                    request.restart_shell = Some((pane, shell));
+
+                                ui.separator();
+                                ui.add_space(2.0);
+                                // A real (framed) button, not a frameless
+                                // "link" style: the frameless version's text
+                                // color was hardcoded to `MUTED` via
+                                // `RichText`, which always wins over the
+                                // widget-state-driven hover color our theme
+                                // otherwise provides — so it never visibly
+                                // reacted to hover at all. A plain button gets
+                                // that hover feedback for free from the same
+                                // theming every other button in this menu
+                                // already uses.
+                                if ui.button("Settings...").clicked() {
+                                    settings_draft = Some(SettingsDraft::from_config(settings));
                                     close_after = true;
                                 }
-                            });
-
-                            ui.separator();
-                            section_header(ui, "Pane");
-                            if ui.button("Close").clicked() {
-                                request.close_pane = Some(pane);
-                                close_after = true;
-                            }
-
-                            ui.separator();
-                            ui.add_space(2.0);
-                            // A real (framed) button, not a frameless
-                            // "link" style: the frameless version's text
-                            // color was hardcoded to `MUTED` via
-                            // `RichText`, which always wins over the
-                            // widget-state-driven hover color our theme
-                            // otherwise provides — so it never visibly
-                            // reacted to hover at all. A plain button gets
-                            // that hover feedback for free from the same
-                            // theming every other button in this menu
-                            // already uses.
-                            if ui.button("Settings...").clicked() {
-                                settings_draft = Some(SettingsDraft::from_config(settings));
-                                close_after = true;
-                            }
                             });
                         });
-                    });
+                    },
+                );
             }
 
             if let Some((pane, pos)) = terminal_context_menu {
@@ -627,19 +646,19 @@ impl Ui {
                             // whatever `available_height` reports here.
                             ui.set_max_height(max_height);
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                            if ui.button("Copy").clicked() {
-                                request.copy_selection = Some(pane);
-                                close_terminal_after = true;
-                            }
-                            if ui.button("Paste").clicked() {
-                                request.paste_clipboard = Some(pane);
-                                close_terminal_after = true;
-                            }
-                            ui.separator();
-                            if ui.button("Close").clicked() {
-                                request.close_pane = Some(pane);
-                                close_terminal_after = true;
-                            }
+                                if ui.button("Copy").clicked() {
+                                    request.copy_selection = Some(pane);
+                                    close_terminal_after = true;
+                                }
+                                if ui.button("Paste").clicked() {
+                                    request.paste_clipboard = Some(pane);
+                                    close_terminal_after = true;
+                                }
+                                ui.separator();
+                                if ui.button("Close").clicked() {
+                                    request.close_pane = Some(pane);
+                                    close_terminal_after = true;
+                                }
                             });
                         });
                     });
@@ -679,16 +698,17 @@ impl Ui {
                         // only past that; it was pinned at 160px, which
                         // scrolled a four-line paste on a full-screen
                         // window for no reason.
-                        egui::ScrollArea::vertical()
-                            .max_height(flexible_region_height(ui.available_height()))
-                            .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut text.as_str())
-                                    .desired_width(f32::INFINITY)
-                                    .font(egui::TextStyle::Monospace)
-                                    .interactive(false),
-                            );
-                        });
+                        egui::ScrollArea::vertical().max_height(flexible_region_height(ui.available_height())).show(
+                            ui,
+                            |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut text.as_str())
+                                        .desired_width(f32::INFINITY)
+                                        .font(egui::TextStyle::Monospace)
+                                        .interactive(false),
+                                );
+                            },
+                        );
                         ui.separator();
                         action_row(ui, |ui| {
                             if ui.button("Paste anyway").clicked() {
@@ -719,263 +739,288 @@ impl Ui {
                     .default_width(420.0)
                     .open(&mut still_open)
                     .show(&ctx, |ui| {
-                    // Deliberately *not* `Window::scroll`. That enables
-                    // egui's own built-in scroll area, which is built as
-                    // `ScrollArea::neither().auto_shrink(false)` — the
-                    // `auto_shrink(false)` makes it fill all available
-                    // height instead of fitting its content, so the panel
-                    // stretched to the full window and scrolled with room
-                    // to spare. Our own scroll area below can be configured
-                    // to shrink to content, which is what's wanted.
-                    //
-                    // Recomputed every frame, not just set once via
-                    // `default_width`. `Area::constrain` shrinks a window's
-                    // remembered size to fit when the app window narrows,
-                    // and nothing ever grows it back — so a panel squeezed
-                    // by a narrow window stayed squeezed after the window
-                    // was widened again. Re-asserting the width each frame
-                    // is what the context menus were already doing, which
-                    // is why they never had this problem.
-                    let (panel_width, _) = popup_bounds(&ctx, 420.0);
-                    ui.set_width(panel_width);
-                    // Never taller than the app window it sits in; sized by
-                    // its content below that.
-                    ui.set_max_height(panel_content_height(ctx.content_rect().height()));
-                    // Proportional, not pixel-fixed: a fraction of
-                    // whatever the window's *actual current* width is,
-                    // recomputed every frame, rather than hardcoded
-                    // absolute numbers. The window is resizable again
-                    // (a fixed-size window has no real use for "flex"),
-                    // so this is what keeps the label/control ratio
-                    // looking the same whether the developer drags it
-                    // wider or it renders on a different sized display.
-                    // Reading `available_width()` here — once, at the
-                    // top of the window's own content `Ui`, not nested
-                    // inside a `Grid` cell — is exactly what's safe about
-                    // it: this is a real, already-settled width (the
-                    // window's), unlike the runaway values that came from
-                    // calling it deep inside a `Grid`/`Area` before their
-                    // own size was known.
-                    // Everything, including Save/Cancel, sits inside one
-                    // scroll area. `auto_shrink` vertical means it takes
-                    // exactly its content's height and shows no scrollbar
-                    // until the panel genuinely outgrows the app window;
-                    // horizontal off so it fills the panel's width. Having
-                    // the buttons *inside* it is the point: with them
-                    // outside, an expanded keybinding list grew past the
-                    // bottom and drew straight over them.
-                    egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
-                    let content_width = ui.available_width();
-                    let label_width = (content_width * LABEL_COL_FRACTION).clamp(80.0, 160.0);
-                    let value_width = (content_width - label_width - GRID_COLUMN_GAP).max(80.0);
+                        // Deliberately *not* `Window::scroll`. That enables
+                        // egui's own built-in scroll area, which is built as
+                        // `ScrollArea::neither().auto_shrink(false)` — the
+                        // `auto_shrink(false)` makes it fill all available
+                        // height instead of fitting its content, so the panel
+                        // stretched to the full window and scrolled with room
+                        // to spare. Our own scroll area below can be configured
+                        // to shrink to content, which is what's wanted.
+                        //
+                        // Recomputed every frame, not just set once via
+                        // `default_width`. `Area::constrain` shrinks a window's
+                        // remembered size to fit when the app window narrows,
+                        // and nothing ever grows it back — so a panel squeezed
+                        // by a narrow window stayed squeezed after the window
+                        // was widened again. Re-asserting the width each frame
+                        // is what the context menus were already doing, which
+                        // is why they never had this problem.
+                        let (panel_width, _) = popup_bounds(&ctx, 420.0);
+                        ui.set_width(panel_width);
+                        // Never taller than the app window it sits in; sized by
+                        // its content below that.
+                        ui.set_max_height(panel_content_height(ctx.content_rect().height()));
+                        // Proportional, not pixel-fixed: a fraction of
+                        // whatever the window's *actual current* width is,
+                        // recomputed every frame, rather than hardcoded
+                        // absolute numbers. The window is resizable again
+                        // (a fixed-size window has no real use for "flex"),
+                        // so this is what keeps the label/control ratio
+                        // looking the same whether the developer drags it
+                        // wider or it renders on a different sized display.
+                        // Reading `available_width()` here — once, at the
+                        // top of the window's own content `Ui`, not nested
+                        // inside a `Grid` cell — is exactly what's safe about
+                        // it: this is a real, already-settled width (the
+                        // window's), unlike the runaway values that came from
+                        // calling it deep inside a `Grid`/`Area` before their
+                        // own size was known.
+                        // Everything, including Save/Cancel, sits inside one
+                        // scroll area. `auto_shrink` vertical means it takes
+                        // exactly its content's height and shows no scrollbar
+                        // until the panel genuinely outgrows the app window;
+                        // horizontal off so it fills the panel's width. Having
+                        // the buttons *inside* it is the point: with them
+                        // outside, an expanded keybinding list grew past the
+                        // bottom and drew straight over them.
+                        egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                            let content_width = ui.available_width();
+                            let label_width = (content_width * LABEL_COL_FRACTION).clamp(80.0, 160.0);
+                            let value_width = (content_width - label_width - GRID_COLUMN_GAP).max(80.0);
 
-                    section_header(ui, "Appearance");
-                    egui::Grid::new("settings-appearance").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
-                        ui,
-                        |ui| {
-                            grid_label(ui, "Font", label_width);
-                            let selected = if draft.font_family.is_empty() {
-                                "monospace (system default)"
-                            } else {
-                                &draft.font_family
-                            };
-                            egui::ComboBox::from_id_salt("font-family")
-                                .width(value_width)
-                                .selected_text(selected)
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut draft.font_family,
-                                        String::new(),
-                                        "monospace (system default)",
+                            section_header(ui, "Appearance");
+                            egui::Grid::new("settings-appearance").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
+                                ui,
+                                |ui| {
+                                    grid_label(ui, "Font", label_width);
+                                    let selected = if draft.font_family.is_empty() {
+                                        "monospace (system default)"
+                                    } else {
+                                        &draft.font_family
+                                    };
+                                    egui::ComboBox::from_id_salt("font-family")
+                                        .width(value_width)
+                                        .selected_text(selected)
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut draft.font_family,
+                                                String::new(),
+                                                "monospace (system default)",
+                                            );
+                                            for name in render::monospace_font_families() {
+                                                ui.selectable_value(
+                                                    &mut draft.font_family,
+                                                    name.clone(),
+                                                    name.as_str(),
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+
+                                    grid_label(ui, "Size", label_width);
+                                    slider_field(ui, value_width, egui::Slider::new(&mut draft.font_size, 6.0..=48.0));
+                                    ui.end_row();
+
+                                    grid_label(ui, "Background", label_width);
+                                    color_field(ui, value_width, &mut draft.background_color);
+                                    ui.end_row();
+
+                                    grid_label(ui, "Accent", label_width);
+                                    color_field(ui, value_width, &mut draft.accent_color);
+                                    ui.end_row();
+                                },
+                            );
+
+                            ui.separator();
+                            section_header(ui, "Terminal");
+                            egui::Grid::new("settings-terminal").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
+                                ui,
+                                |ui| {
+                                    grid_label(ui, "Transparency", label_width);
+                                    // Disabled, not hidden, on WSL: the setting still
+                                    // saves and applies normally on the platforms that
+                                    // actually support it (Windows, native Linux) —
+                                    // WSLg's compositor doesn't handle real window
+                                    // transparency correctly (see `platform::is_wsl`'s
+                                    // doc comment), and WSL isn't a target platform
+                                    // here, just a dev environment, so this is
+                                    // disabled outright rather than left to silently
+                                    // do nothing when dragged.
+                                    ui.add_enabled_ui(!crate::platform::is_wsl(), |ui| {
+                                        slider_field(
+                                            ui,
+                                            value_width,
+                                            egui::Slider::new(&mut draft.transparency, 0.0..=1.0),
+                                        );
+                                    });
+                                    ui.end_row();
+
+                                    grid_label(ui, "Scrollback", label_width);
+                                    field_box(ui, value_width, |ui| {
+                                        ui.add(
+                                            egui::DragValue::new(&mut draft.scrollback_lines)
+                                                .range(0..=1_000_000usize)
+                                                .suffix(" lines"),
+                                        );
+                                    });
+                                    ui.end_row();
+
+                                    grid_label(ui, "Cursor", label_width);
+                                    // A stretched segmented control (`ui.columns` +
+                                    // `add_sized`), not a plain `ui.horizontal` of
+                                    // `selectable_value`s — matching the mockup's
+                                    // `.segmented` row, whose three buttons use
+                                    // `flex: 1` to fill the full column width instead
+                                    // of shrinking to their own label text.
+                                    let mut clicked_style = None;
+                                    ui.columns(3, |cols| {
+                                        for (col, (style, label)) in cols.iter_mut().zip([
+                                            (config::CursorStyle::Block, "Block"),
+                                            (config::CursorStyle::Underline, "Underline"),
+                                            (config::CursorStyle::Beam, "Beam"),
+                                        ]) {
+                                            let selected = draft.cursor_style == style;
+                                            if col
+                                                .add_sized(
+                                                    [col.available_width(), 0.0],
+                                                    egui::Button::selectable(selected, label),
+                                                )
+                                                .clicked()
+                                            {
+                                                clicked_style = Some(style);
+                                            }
+                                        }
+                                    });
+                                    if let Some(style) = clicked_style {
+                                        draft.cursor_style = style;
+                                    }
+                                    ui.end_row();
+                                },
+                            );
+                            if crate::platform::is_wsl() {
+                                ui.weak("Transparency isn't supported under WSL.");
+                            }
+
+                            ui.separator();
+                            section_header(ui, "Shell");
+                            egui::Grid::new("settings-shell").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
+                                ui,
+                                |ui| {
+                                    grid_label(ui, "Default", label_width);
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut draft.default_shell)
+                                            .hint_text("(platform default)")
+                                            .desired_width(value_width),
                                     );
-                                    for name in render::monospace_font_families() {
-                                        ui.selectable_value(&mut draft.font_family, name.clone(), name.as_str());
+                                    ui.end_row();
+                                },
+                            );
+                            // Windows-only: unlike Linux/macOS (one obvious choice
+                            // — whatever `$SHELL`/the OS already has configured,
+                            // which leaving this field empty already picks up),
+                            // Windows has no single obvious default shell — cmd,
+                            // Windows PowerShell, and WSL are all common, equally
+                            // reasonable choices, and typing an exact executable
+                            // name/path into the field above is real friction
+                            // compared to picking one. These just fill that field
+                            // in; the field itself still takes any custom value (a
+                            // specific WSL distro invocation, `pwsh.exe`, ...).
+                            //
+                            // A full-width row below the grid, not a third grid
+                            // row: the mockup's own `.quick-picks` sits outside
+                            // `.field-grid` as its own sibling, spanning the whole
+                            // section instead of being squeezed into just the
+                            // value column — confirmed by re-reading the mockup's
+                            // HTML directly rather than assuming.
+                            #[cfg(target_os = "windows")]
+                            {
+                                ui.add_space(2.0);
+                                ui.columns(3, |cols| {
+                                    if cols[0]
+                                        .add_sized(
+                                            [cols[0].available_width(), 0.0],
+                                            egui::Button::new("Command Prompt"),
+                                        )
+                                        .clicked()
+                                    {
+                                        draft.default_shell = "cmd.exe".to_string();
+                                    }
+                                    if cols[1]
+                                        .add_sized([cols[1].available_width(), 0.0], egui::Button::new("PowerShell"))
+                                        .clicked()
+                                    {
+                                        draft.default_shell = "powershell.exe".to_string();
+                                    }
+                                    if cols[2]
+                                        .add_sized([cols[2].available_width(), 0.0], egui::Button::new("WSL"))
+                                        .clicked()
+                                    {
+                                        draft.default_shell = "wsl.exe".to_string();
                                     }
                                 });
-                            ui.end_row();
+                            }
 
-                            grid_label(ui, "Size", label_width);
-                            slider_field(ui, value_width, egui::Slider::new(&mut draft.font_size, 6.0..=48.0));
-                            ui.end_row();
-
-                            grid_label(ui, "Background", label_width);
-                            color_field(ui, value_width, &mut draft.background_color);
-                            ui.end_row();
-
-                            grid_label(ui, "Accent", label_width);
-                            color_field(ui, value_width, &mut draft.accent_color);
-                            ui.end_row();
-                        },
-                    );
-
-                    ui.separator();
-                    section_header(ui, "Terminal");
-                    egui::Grid::new("settings-terminal").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
-                        ui,
-                        |ui| {
-                        grid_label(ui, "Transparency", label_width);
-                        // Disabled, not hidden, on WSL: the setting still
-                        // saves and applies normally on the platforms that
-                        // actually support it (Windows, native Linux) —
-                        // WSLg's compositor doesn't handle real window
-                        // transparency correctly (see `platform::is_wsl`'s
-                        // doc comment), and WSL isn't a target platform
-                        // here, just a dev environment, so this is
-                        // disabled outright rather than left to silently
-                        // do nothing when dragged.
-                        ui.add_enabled_ui(!crate::platform::is_wsl(), |ui| {
-                            slider_field(ui, value_width, egui::Slider::new(&mut draft.transparency, 0.0..=1.0));
-                        });
-                        ui.end_row();
-
-                        grid_label(ui, "Scrollback", label_width);
-                        field_box(ui, value_width, |ui| {
-                            ui.add(egui::DragValue::new(&mut draft.scrollback_lines).range(0..=1_000_000usize).suffix(" lines"));
-                        });
-                        ui.end_row();
-
-                        grid_label(ui, "Cursor", label_width);
-                        // A stretched segmented control (`ui.columns` +
-                        // `add_sized`), not a plain `ui.horizontal` of
-                        // `selectable_value`s — matching the mockup's
-                        // `.segmented` row, whose three buttons use
-                        // `flex: 1` to fill the full column width instead
-                        // of shrinking to their own label text.
-                        let mut clicked_style = None;
-                        ui.columns(3, |cols| {
-                            for (col, (style, label)) in cols.iter_mut().zip([
-                                (config::CursorStyle::Block, "Block"),
-                                (config::CursorStyle::Underline, "Underline"),
-                                (config::CursorStyle::Beam, "Beam"),
-                            ]) {
-                                let selected = draft.cursor_style == style;
-                                if col
-                                    .add_sized([col.available_width(), 0.0], egui::Button::selectable(selected, label))
-                                    .clicked()
-                                {
-                                    clicked_style = Some(style);
+                            ui.separator();
+                            section_header(ui, "Keybindings");
+                            // Read-only: hand-edit `config.toml`'s `[keybindings]`
+                            // to change these (Milestone 5.3) — remapping chords
+                            // from inside the panel is future polish, not something
+                            // 5.4's own acceptance criteria call for.
+                            //
+                            // Lists what's *in effect*, defaults included, rather
+                            // than only the overrides. Showing overrides alone made
+                            // this section useless to the people most likely to
+                            // open it: someone who has never edited the config sees
+                            // an empty box telling them defaults exist, without
+                            // saying what any of them are.
+                            ui.weak("Edit [keybindings] in config.toml to change these.");
+                            ui.add_space(2.0);
+                            // Collapsed by default, and never scrolled: the list is
+                            // long, but it's reference material nobody needs open
+                            // while changing a font size. Folding it away keeps the
+                            // panel short enough to render whole, which a scrolling
+                            // sub-region never managed — and when it is open it's
+                            // read top to bottom, so a viewport showing six rows at
+                            // a time is worse than simply being tall.
+                            egui::CollapsingHeader::new("Show all keybindings")
+                                .id_salt("keybindings-list")
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    for row in rows {
+                                        let text = format!("{}  \u{2192}  {}", row.chord, row.action);
+                                        if row.custom {
+                                            ui.label(format!("{text}   (custom)"));
+                                        } else {
+                                            ui.weak(text);
+                                        }
+                                    }
+                                });
+                            ui.separator();
+                            // `right_to_left`: the mockup's action row is flush
+                            // against the panel's right edge (Cancel, then Save
+                            // at the very edge), not left-packed like a plain
+                            // `ui.horizontal` would render it — the first widget
+                            // added under `right_to_left` lands rightmost, so Save
+                            // is added first here despite reading second on
+                            // screen.
+                            action_row(ui, |ui| {
+                                if ui.button("Save").clicked() {
+                                    let new_config = draft.apply_to(settings);
+                                    if let Err(err) = new_config.save(&config::Config::default_path()) {
+                                        eprintln!("config: failed to save settings: {err:#}");
+                                    }
+                                    request.settings_saved = Some(new_config);
+                                    close_settings_panel = true;
                                 }
-                            }
-                        });
-                        if let Some(style) = clicked_style {
-                            draft.cursor_style = style;
-                        }
-                        ui.end_row();
-                    });
-                    if crate::platform::is_wsl() {
-                        ui.weak("Transparency isn't supported under WSL.");
-                    }
-
-                    ui.separator();
-                    section_header(ui, "Shell");
-                    egui::Grid::new("settings-shell").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(ui, |ui| {
-                        grid_label(ui, "Default", label_width);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut draft.default_shell)
-                                .hint_text("(platform default)")
-                                .desired_width(value_width),
-                        );
-                        ui.end_row();
-                    });
-                    // Windows-only: unlike Linux/macOS (one obvious choice
-                    // — whatever `$SHELL`/the OS already has configured,
-                    // which leaving this field empty already picks up),
-                    // Windows has no single obvious default shell — cmd,
-                    // Windows PowerShell, and WSL are all common, equally
-                    // reasonable choices, and typing an exact executable
-                    // name/path into the field above is real friction
-                    // compared to picking one. These just fill that field
-                    // in; the field itself still takes any custom value (a
-                    // specific WSL distro invocation, `pwsh.exe`, ...).
-                    //
-                    // A full-width row below the grid, not a third grid
-                    // row: the mockup's own `.quick-picks` sits outside
-                    // `.field-grid` as its own sibling, spanning the whole
-                    // section instead of being squeezed into just the
-                    // value column — confirmed by re-reading the mockup's
-                    // HTML directly rather than assuming.
-                    #[cfg(target_os = "windows")]
-                    {
-                        ui.add_space(2.0);
-                        ui.columns(3, |cols| {
-                            if cols[0]
-                                .add_sized([cols[0].available_width(), 0.0], egui::Button::new("Command Prompt"))
-                                .clicked()
-                            {
-                                draft.default_shell = "cmd.exe".to_string();
-                            }
-                            if cols[1]
-                                .add_sized([cols[1].available_width(), 0.0], egui::Button::new("PowerShell"))
-                                .clicked()
-                            {
-                                draft.default_shell = "powershell.exe".to_string();
-                            }
-                            if cols[2].add_sized([cols[2].available_width(), 0.0], egui::Button::new("WSL")).clicked() {
-                                draft.default_shell = "wsl.exe".to_string();
-                            }
-                        });
-                    }
-
-                    ui.separator();
-                    section_header(ui, "Keybindings");
-                    // Read-only: hand-edit `config.toml`'s `[keybindings]`
-                    // to change these (Milestone 5.3) — remapping chords
-                    // from inside the panel is future polish, not something
-                    // 5.4's own acceptance criteria call for.
-                    //
-                    // Lists what's *in effect*, defaults included, rather
-                    // than only the overrides. Showing overrides alone made
-                    // this section useless to the people most likely to
-                    // open it: someone who has never edited the config sees
-                    // an empty box telling them defaults exist, without
-                    // saying what any of them are.
-                    ui.weak("Edit [keybindings] in config.toml to change these.");
-                    ui.add_space(2.0);
-                    // Collapsed by default, and never scrolled: the list is
-                    // long, but it's reference material nobody needs open
-                    // while changing a font size. Folding it away keeps the
-                    // panel short enough to render whole, which a scrolling
-                    // sub-region never managed — and when it is open it's
-                    // read top to bottom, so a viewport showing six rows at
-                    // a time is worse than simply being tall.
-                    egui::CollapsingHeader::new("Show all keybindings")
-                        .id_salt("keybindings-list")
-                        .default_open(false)
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            for row in rows {
-                                let text = format!("{}  \u{2192}  {}", row.chord, row.action);
-                                if row.custom {
-                                    ui.label(format!("{text}   (custom)"));
-                                } else {
-                                    ui.weak(text);
+                                if ui.button("Cancel").clicked() {
+                                    request.settings_cancelled = true;
+                                    close_settings_panel = true;
                                 }
-                            }
+                            });
                         });
-                    ui.separator();
-                    // `right_to_left`: the mockup's action row is flush
-                    // against the panel's right edge (Cancel, then Save
-                    // at the very edge), not left-packed like a plain
-                    // `ui.horizontal` would render it — the first widget
-                    // added under `right_to_left` lands rightmost, so Save
-                    // is added first here despite reading second on
-                    // screen.
-                    action_row(ui, |ui| {
-                        if ui.button("Save").clicked() {
-                            let new_config = draft.apply_to(settings);
-                            if let Err(err) = new_config.save(&config::Config::default_path()) {
-                                eprintln!("config: failed to save settings: {err:#}");
-                            }
-                            request.settings_saved = Some(new_config);
-                            close_settings_panel = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            request.settings_cancelled = true;
-                            close_settings_panel = true;
-                        }
                     });
-                    });
-                });
                 if !still_open {
                     // The window's own close button, not either of our
                     // two — same as Cancel: closed without an explicit
@@ -1036,10 +1081,8 @@ impl Ui {
         pixels_per_point: f32,
         full_output: egui::FullOutput,
     ) {
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [screen_size.0, screen_size.1],
-            pixels_per_point,
-        };
+        let screen_descriptor =
+            egui_wgpu::ScreenDescriptor { size_in_pixels: [screen_size.0, screen_size.1], pixels_per_point };
 
         let clipped_primitives = self.ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
@@ -1060,10 +1103,7 @@ impl Ui {
                     view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 ..Default::default()
             });
@@ -1301,7 +1341,11 @@ fn hex_rgb(rgb: [f32; 3]) -> String {
 /// and any chrome code that needs the live accent color for an explicit
 /// per-widget override (e.g. the broadcast radio row's active label).
 fn color32_from_rgb(rgb: [f32; 3]) -> egui::Color32 {
-    egui::Color32::from_rgb((rgb[0] * 255.0).round() as u8, (rgb[1] * 255.0).round() as u8, (rgb[2] * 255.0).round() as u8)
+    egui::Color32::from_rgb(
+        (rgb[0] * 255.0).round() as u8,
+        (rgb[1] * 255.0).round() as u8,
+        (rgb[2] * 255.0).round() as u8,
+    )
 }
 
 /// Shrinks egui's own default chrome text sizes toward the mockup's denser
@@ -1427,10 +1471,7 @@ mod tests {
 
     #[test]
     fn an_override_is_shown_in_effect_and_marked_custom() {
-        let rows = effective_binding_rows(&BTreeMap::from([(
-            "ctrl+shift+e".to_string(),
-            "close_pane".to_string(),
-        )]));
+        let rows = effective_binding_rows(&BTreeMap::from([("ctrl+shift+e".to_string(), "close_pane".to_string())]));
 
         let changed = row(&rows, "ctrl+shift+e").expect("still listed");
         assert_eq!(changed.action, "close_pane");
@@ -1446,8 +1487,7 @@ mod tests {
     /// exactly the confusion someone opens this list to resolve.
     #[test]
     fn a_chord_the_config_unbound_is_listed_rather_than_dropped() {
-        let rows =
-            effective_binding_rows(&BTreeMap::from([("ctrl+shift+x".to_string(), "none".to_string())]));
+        let rows = effective_binding_rows(&BTreeMap::from([("ctrl+shift+x".to_string(), "none".to_string())]));
 
         let removed = row(&rows, "ctrl+shift+x").expect("listed even though it's unbound");
         assert_eq!(removed.action, "(unbound)");

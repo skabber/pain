@@ -2613,6 +2613,7 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "fontdb",
+ "pollster",
  "wgpu",
 ]
 

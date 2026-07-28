@@ -14,6 +14,25 @@ use serde::{Deserialize, Serialize};
 /// actually named.
 const APP_NAME: &str = "pain";
 
+/// Bounds every numeric appearance value is forced into by
+/// [`Config::sanitize`]. These match the settings panel's own slider ranges,
+/// so a hand-edited file can't reach a state the UI would never produce.
+///
+/// The font-size bounds are not cosmetic. `render::measure_cell` builds a
+/// `cosmic_text::Metrics` from the font size, and a size of zero gives a
+/// zero line height, which `cosmic_text::Buffer` asserts against — a
+/// `font_size = 0` in a hand-edited file used to panic the whole app the
+/// moment the hot-reload watcher picked the edit up. A negative size doesn't
+/// panic; it hangs, spinning at 100% CPU inside text layout and never
+/// returning. Neither is something a running terminal should ever be able to
+/// do to itself over a config edit.
+pub const MIN_FONT_SIZE: f32 = 6.0;
+pub const MAX_FONT_SIZE: f32 = 48.0;
+/// A ceiling on retained history per pane. Scrollback is allocated as it
+/// fills rather than up front, so this bounds how much memory a pane can
+/// eventually reach, not what it starts at.
+pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+
 #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -128,6 +147,22 @@ impl Appearance {
     }
 }
 
+/// Prints what [`Config::sanitize`] changed, one line each. Public so the
+/// app's hot-reload path reports adjustments in the same voice the initial
+/// load does, instead of formatting them itself.
+pub fn report(adjustments: &[String]) {
+    for adjustment in adjustments {
+        eprintln!("config: {adjustment}");
+    }
+}
+
+/// `value` clamped into `min..=max`, or `fallback` when it's `NaN` —
+/// `f32::clamp` propagates `NaN` straight through rather than bounding it,
+/// so a `NaN` in the file would otherwise pass this check untouched.
+fn sane(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_nan() { fallback } else { value.clamp(min, max) }
+}
+
 fn format_hex_rgb(rgb: [f32; 3]) -> String {
     let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     format!("#{:02x}{:02x}{:02x}", channel(rgb[0]), channel(rgb[1]), channel(rgb[2]))
@@ -177,7 +212,10 @@ impl Config {
     /// what `try_load` is for.
     pub fn load(path: &Path) -> Config {
         match Self::try_load(path) {
-            Ok(config) => config,
+            Ok((config, adjustments)) => {
+                report(&adjustments);
+                config
+            }
             Err(err) => {
                 eprintln!("config: failed to parse {}: {err}", path.display());
                 Config::default()
@@ -190,11 +228,70 @@ impl Config {
     /// design/config-system.md` specifies. A present-but-unparseable file
     /// is `Err`, so a caller doing a hot reload can keep the last-good
     /// config on a bad edit instead of resetting to defaults.
-    pub fn try_load(path: &Path) -> Result<Config, toml::de::Error> {
+    /// Also returns whatever [`Config::sanitize`] had to change, phrased for
+    /// the user, rather than printing it here. A file watcher re-reads the
+    /// file several times for a single save (one write is several
+    /// filesystem events, and only the caller knows whether the result
+    /// differs from what's already loaded), so reporting at parse time
+    /// printed the same complaint about a dozen times per edit. The caller
+    /// reports it at the point it decides to actually apply the result.
+    pub fn try_load(path: &Path) -> Result<(Config, Vec<String>), toml::de::Error> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents),
-            Err(_) => Ok(Config::default()),
+            Ok(contents) => {
+                let mut config: Config = toml::from_str(&contents)?;
+                let adjustments = config.sanitize();
+                Ok((config, adjustments))
+            }
+            Err(_) => Ok((Config::default(), Vec::new())),
         }
+    }
+
+    /// Forces every numeric value into a range the rest of the app can
+    /// actually handle, reporting anything it had to change.
+    ///
+    /// Applied to every file that parses, so no hand-edited value ever
+    /// reaches the renderer or the terminal grid unchecked. This is the same
+    /// "never crash on a bad edit" convention `background_color`'s parse
+    /// fallback already follows, extended to the numeric fields — which
+    /// previously had no validation at all, and where a bad value was not a
+    /// cosmetic problem but a panic or a hang (see [`MIN_FONT_SIZE`]).
+    ///
+    /// Out-of-range values are clamped rather than reset to the default: a
+    /// `font_size = 100` is a legible intent ("as big as you'll give me"),
+    /// and 48 serves it better than silently dropping back to 13 would.
+    /// A non-finite value has no intent to preserve, so it takes the
+    /// default.
+    fn sanitize(&mut self) -> Vec<String> {
+        let defaults = Appearance::default();
+        let mut adjustments = Vec::new();
+
+        let font_size = sane(self.appearance.font_size, MIN_FONT_SIZE, MAX_FONT_SIZE, defaults.font_size);
+        if font_size != self.appearance.font_size {
+            adjustments.push(format!(
+                "font_size {} is out of range ({MIN_FONT_SIZE}-{MAX_FONT_SIZE}); using {font_size}",
+                self.appearance.font_size
+            ));
+            self.appearance.font_size = font_size;
+        }
+
+        let transparency = sane(self.appearance.transparency, 0.0, 1.0, defaults.transparency);
+        if transparency != self.appearance.transparency {
+            adjustments.push(format!(
+                "transparency {} is out of range (0.0-1.0); using {transparency}",
+                self.appearance.transparency
+            ));
+            self.appearance.transparency = transparency;
+        }
+
+        if self.general.scrollback_lines > MAX_SCROLLBACK_LINES {
+            adjustments.push(format!(
+                "scrollback_lines {} exceeds the {MAX_SCROLLBACK_LINES} line maximum; using {MAX_SCROLLBACK_LINES}",
+                self.general.scrollback_lines
+            ));
+            self.general.scrollback_lines = MAX_SCROLLBACK_LINES;
+        }
+
+        adjustments
     }
 
     /// Serializes and writes `self` to `path`, creating its parent
@@ -356,5 +453,80 @@ mod tests {
         assert_eq!(Config::load(&path), config);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Writes `body` to a throwaway `config.toml` and loads it back, so
+    /// these exercise the real parse-then-sanitize path rather than calling
+    /// `sanitize` directly — the file is where a bad value actually comes
+    /// from, and `try_load` is the only thing standing between it and the
+    /// renderer.
+    fn load_from_toml(name: &str, body: &str) -> Config {
+        let dir = std::env::temp_dir().join(format!("pain-config-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, body).unwrap();
+        let config = Config::load(&path);
+        std::fs::remove_dir_all(&dir).ok();
+        config
+    }
+
+    /// A zero font size used to take down the whole app: it reaches
+    /// `cosmic_text::Metrics` as a zero *line height*, which `Buffer`
+    /// asserts against. Via the config watcher that meant saving the file
+    /// panicked a running terminal — not a startup-only problem.
+    #[test]
+    fn a_zero_font_size_is_clamped_rather_than_reaching_the_renderer() {
+        let config = load_from_toml("zero-font", "[appearance]\nfont_size = 0.0\n");
+        assert_eq!(config.appearance.font_size, MIN_FONT_SIZE);
+    }
+
+    /// A negative font size didn't panic — it hung, spinning at 100% CPU
+    /// inside text layout and never returning, which is strictly worse
+    /// (no message, no exit, nothing to report).
+    #[test]
+    fn a_negative_font_size_is_clamped_rather_than_reaching_the_renderer() {
+        let config = load_from_toml("negative-font", "[appearance]\nfont_size = -13.0\n");
+        assert_eq!(config.appearance.font_size, MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn an_absurdly_large_font_size_is_clamped_to_the_maximum() {
+        let config = load_from_toml("huge-font", "[appearance]\nfont_size = 4000.0\n");
+        assert_eq!(config.appearance.font_size, MAX_FONT_SIZE);
+    }
+
+    /// `f32::clamp` returns `NaN` unchanged, so this needs its own handling
+    /// — a clamp alone would let it straight through.
+    #[test]
+    fn a_non_numeric_font_size_falls_back_to_the_default() {
+        let config = load_from_toml("nan-font", "[appearance]\nfont_size = nan\n");
+        assert_eq!(config.appearance.font_size, Appearance::default().font_size);
+    }
+
+    #[test]
+    fn transparency_outside_zero_to_one_is_clamped() {
+        assert_eq!(load_from_toml("over-alpha", "[appearance]\ntransparency = 4.0\n").appearance.transparency, 1.0);
+        assert_eq!(load_from_toml("under-alpha", "[appearance]\ntransparency = -1.0\n").appearance.transparency, 0.0);
+        assert_eq!(
+            load_from_toml("nan-alpha", "[appearance]\ntransparency = nan\n").appearance.transparency,
+            Appearance::default().transparency
+        );
+    }
+
+    #[test]
+    fn scrollback_lines_is_capped() {
+        let config = load_from_toml("huge-scrollback", "[general]\nscrollback_lines = 99999999999\n");
+        assert_eq!(config.general.scrollback_lines, MAX_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn values_already_in_range_are_left_exactly_as_written() {
+        let config = load_from_toml(
+            "in-range",
+            "[appearance]\nfont_size = 17.5\ntransparency = 0.8\n\n[general]\nscrollback_lines = 200\n",
+        );
+        assert_eq!(config.appearance.font_size, 17.5);
+        assert_eq!(config.appearance.transparency, 0.8);
+        assert_eq!(config.general.scrollback_lines, 200);
     }
 }

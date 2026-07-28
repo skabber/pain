@@ -7,6 +7,27 @@ publicly from `github.com/w-p/pain`.
 The product name is settled: **pain**. It's the crate, the binary, the
 config directory, and the published package name — no longer a placeholder.
 
+**Post-1.6.0 hardening pass (2026-07-28).** The project's first external bug
+report ([issue #1](https://github.com/w-p/pain/issues/1) — the font-size
+slider crashing the app on glyph-atlas exhaustion) prompted a deliberate
+bug hunt across the whole workspace. Seven real defects were found, each
+reproduced before being fixed: the atlas crash itself; a `font_size = 0`
+panic and a negative-`font_size` 100%-CPU hang, both reachable by hand-
+editing `config.toml` and both triggered by the *hot reload* path, i.e.
+against a running terminal; `general.scrollback_lines` having no effect at
+all (fully wired as a setting, never passed to the terminal grid); the
+paste-confirmation prompt being bypassable with carriage returns instead of
+newlines; divider drags and text selections latching to the pointer when
+the release landed on the egui overlay or window focus was lost; a ghost
+pane left in the layout when session restore couldn't spawn a shell; and a
+stale PTY size after a failed split. Numeric config values are now clamped
+at the `config` crate boundary (`Config::sanitize`), which is the general
+guard against this class — nothing hand-edited reaches the renderer or the
+grid unchecked. `rustfmt.toml` was added in the same pass (`max_width = 120`,
+`use_small_heuristics = "Max"`, chosen by measuring churn against the
+existing tree) and the workspace formatted, so `cargo fmt` is finally safe
+to run.
+
 **Distribution is fully automated.** Pushing a `v*` tag runs
 `.github/workflows/release.yml`, which builds four targets, publishes a
 GitHub Release with notes taken verbatim from `CHANGELOG.md`'s matching

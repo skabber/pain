@@ -192,13 +192,13 @@ lines are skipped one at a time rather than poisoning the whole table.
 ```toml
 [general]
 default_shell = ""            # empty = platform default ($SHELL, or your Windows default)
-scrollback_lines = 5000       # lines of history per pane
+scrollback_lines = 5000       # lines of history per pane (max 1000000)
 confirm_multiline_paste = true
 
 [appearance]
 theme = "default"             # reserved; the theme format isn't settled yet
 font_family = "monospace"     # any installed monospaced family
-font_size = 13                # logical size, scaled by the display's DPI factor
+font_size = 13                # logical size, scaled by the display's DPI factor (6-48)
 transparency = 1.0            # 0.0 transparent .. 1.0 opaque
 background_color = "#0c0e11"
 accent_color = "#7fa2d6"      # cursor, selection, interactive highlights
@@ -217,6 +217,13 @@ arbitrary commands the instant it arrives; turning it off removes that.
 `font_size` is a *logical* size scaled by your display's DPI factor, so 13
 matches other applications on a scaled display rather than rendering smaller
 than everything else.
+
+Numeric settings are clamped to their valid range on load — `font_size` to
+6–48, `transparency` to 0.0–1.0, `scrollback_lines` to at most 1000000 — with
+a note on stderr saying what was changed. A value outside the range is used at
+the nearest end rather than reset to its default, since "as big as you'll give
+me" is a legible intent; a value that isn't a number at all falls back to the
+default.
 
 Colors that carry meaning rather than style — the broadcast-target border, for
 instance — are fixed and unaffected by `accent_color`. An unparseable color

@@ -316,12 +316,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         let Some(graphics) = &mut self.graphics else {
             return;
         };
@@ -404,8 +399,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if !ui_consumed => {
-                let chord_result =
-                    winit_chord(&event, self.modifiers).and_then(|chord| graphics.dispatch_chord(chord));
+                let chord_result = winit_chord(&event, self.modifiers).and_then(|chord| graphics.dispatch_chord(chord));
                 match chord_result {
                     Some(true) => graphics.window().request_redraw(),
                     Some(false) => {
@@ -463,6 +457,27 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.cursor_pos = pos;
+            }
+            // Deliberately *not* gated on `!ui_consumed`, unlike every other
+            // pointer arm here. A release is what ends a gesture some
+            // earlier press started, and the overlay reports a release over
+            // itself as consumed — so gating this the same way left drags
+            // and selections latched to the pointer indefinitely. See
+            // `Graphics::end_pointer_gestures`.
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                let modifiers = mouse_modifiers(self.modifiers);
+                if graphics.end_pointer_gestures(self.cursor_pos, modifiers) || !ui_consumed {
+                    graphics.window().request_redraw();
+                }
+            }
+            // Focus can be lost mid-drag (alt-tab, another window taking
+            // over) and no release is ever delivered for the press that's
+            // still outstanding — same latch, different cause.
+            WindowEvent::Focused(false) => {
+                let modifiers = mouse_modifiers(self.modifiers);
+                if graphics.end_pointer_gestures(self.cursor_pos, modifiers) {
+                    graphics.window().request_redraw();
+                }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if !ui_consumed => {
                 if verbose::is_verbose(verbose::Category::Mouse) {
@@ -542,12 +557,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        ElementState::Released => {
-                            graphics.mouse_release(self.cursor_pos, mouse::Button::Left, modifiers);
-                            graphics.end_drag();
-                            graphics.end_selection();
-                            graphics.window().request_redraw();
-                        }
+                        // Releases are handled by their own arm above, which
+                        // runs whether or not the overlay consumed them.
+                        ElementState::Released => {}
                     }
                 }
             }
@@ -620,11 +632,7 @@ impl ApplicationHandler for App {
 /// Translates winit's current modifier state into `mouse::Modifiers`, for
 /// encoding into a forwarded mouse report.
 fn mouse_modifiers(modifiers: ModifiersState) -> mouse::Modifiers {
-    mouse::Modifiers {
-        shift: modifiers.shift_key(),
-        alt: modifiers.alt_key(),
-        ctrl: modifiers.control_key(),
-    }
+    mouse::Modifiers { shift: modifiers.shift_key(), alt: modifiers.alt_key(), ctrl: modifiers.control_key() }
 }
 
 /// Whether `event` is a Tab keypress — see the Tab-key override in

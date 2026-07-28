@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+- Fixed: changing the font size a few times crashed the terminal. Every
+  size you passed through kept its own permanent copy of the character
+  set in the glyph texture, and once that texture filled up the next
+  character written to it ran off the end — which the graphics driver
+  treats as fatal. Only one font size is kept now, the texture is four
+  times larger, and running out of room falls back to reusing it rather
+  than crashing. ([#1](https://github.com/w-p/pain/issues/1))
+- Fixed: `scrollback_lines` did nothing. The setting was saved, shown in
+  the settings panel and documented as defaulting to 5000, but the number
+  never reached the terminal grid — every pane kept a fixed 10000 lines
+  regardless. It now works, and changing it applies to panes that are
+  already open rather than only new ones. **If you never set it, panes now
+  keep 5000 lines of history instead of 10000** — raise it in the settings
+  panel or your config file if you want the old depth back.
+- Fixed: a multi-command paste could skip the confirmation prompt. The
+  check counted only line feeds, but a carriage return submits a command
+  just as well, so text separated with those ran every command it
+  contained without asking. Both count now, and the prompt reports the
+  line count correctly for either.
+- Fixed: hand-editing `font_size` to 0 crashed the app the moment the file
+  was saved, and a negative value froze it at 100% CPU with no way back.
+  Numeric settings are now clamped to their documented ranges on load —
+  `font_size` to 6–48, `transparency` to 0.0–1.0, `scrollback_lines` to at
+  most 1000000 — and say so on stderr.
+- Fixed: dragging a pane divider and releasing the mouse over an open menu
+  or the settings panel left the divider stuck to the pointer, resizing on
+  every later mouse movement with no button held. Losing window focus
+  mid-drag did the same. Text selections and mouse-driven programs had the
+  same problem. All of them now end properly.
+- Fixed: when a pane's shell failed to start while restoring a saved
+  session, the pane stayed in the layout as a dead blank rectangle that
+  could take focus and silently swallow everything typed into it. It is
+  now removed, and the remaining panes take the space.
+- Fixed: if a split failed to start its shell, the pane that was split kept
+  a terminal sized for half the space while drawing at full width.
+
 ## v1.6.0
 
 - On Linux and macOS, nothing is injected into your shell at all any more.

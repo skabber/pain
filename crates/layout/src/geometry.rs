@@ -55,24 +55,13 @@ fn layout_node(
 ) {
     match node {
         Node::Leaf(id) => panes.push(PaneRect { pane: *id, rect: area }),
-        Node::Split {
-            id,
-            orientation,
-            ratio,
-            first,
-            second,
-        } => {
+        Node::Split { id, orientation, ratio, first, second } => {
             let (first_rect, divider_rect, second_rect) = split_area(area, *orientation, *ratio, divider_thickness);
             let axis_extent = match orientation {
                 Orientation::Horizontal => area.width,
                 Orientation::Vertical => area.height,
             };
-            dividers.push(DividerRect {
-                split: *id,
-                orientation: *orientation,
-                rect: divider_rect,
-                axis_extent,
-            });
+            dividers.push(DividerRect { split: *id, orientation: *orientation, rect: divider_rect, axis_extent });
             layout_node(first, first_rect, divider_thickness, panes, dividers);
             layout_node(second, second_rect, divider_thickness, panes, dividers);
         }
@@ -87,12 +76,7 @@ fn split_area(area: Rect, orientation: Orientation, ratio: f32, divider_thicknes
             let first_width = ((area.width - divider_thickness).max(0.0) * ratio).max(0.0);
             let second_width = (area.width - divider_thickness - first_width).max(0.0);
             let first = Rect { x: area.x, y: area.y, width: first_width, height: area.height };
-            let divider = Rect {
-                x: area.x + first_width,
-                y: area.y,
-                width: divider_thickness,
-                height: area.height,
-            };
+            let divider = Rect { x: area.x + first_width, y: area.y, width: divider_thickness, height: area.height };
             let second = Rect {
                 x: area.x + first_width + divider_thickness,
                 y: area.y,
@@ -105,12 +89,7 @@ fn split_area(area: Rect, orientation: Orientation, ratio: f32, divider_thicknes
             let first_height = ((area.height - divider_thickness).max(0.0) * ratio).max(0.0);
             let second_height = (area.height - divider_thickness - first_height).max(0.0);
             let first = Rect { x: area.x, y: area.y, width: area.width, height: first_height };
-            let divider = Rect {
-                x: area.x,
-                y: area.y + first_height,
-                width: area.width,
-                height: divider_thickness,
-            };
+            let divider = Rect { x: area.x, y: area.y + first_height, width: area.width, height: divider_thickness };
             let second = Rect {
                 x: area.x,
                 y: area.y + first_height + divider_thickness,

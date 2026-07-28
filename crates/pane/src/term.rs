@@ -82,23 +82,38 @@ pub struct Screen {
     parser: Processor,
     pty_writes: Receiver<Vec<u8>>,
     cwd: crate::cwd::CwdWatcher,
+    /// Kept so [`Screen::set_scrollback`] can change one field without
+    /// resetting the rest of what `Term` was configured with.
+    config: Config,
 }
 
 impl Screen {
-    /// Creates an empty screen of the given size.
-    pub fn new(size: Size) -> Self {
-        let dimensions = TermSize {
-            columns: size.cols as usize,
-            lines: size.rows as usize,
-        };
+    /// Creates an empty screen of the given size, retaining `scrollback`
+    /// lines of history per pane.
+    ///
+    /// `scrollback` is passed in rather than defaulted: this used to build
+    /// `Config::default()`, whose own `scrolling_history` is 10000, so the
+    /// `general.scrollback_lines` setting — wired all the way through the
+    /// settings panel, saved, and documented as defaulting to 5000 — never
+    /// reached the terminal grid at all and had no effect on anything.
+    pub fn new(size: Size, scrollback: usize) -> Self {
+        let dimensions = TermSize { columns: size.cols as usize, lines: size.rows as usize };
         let (tx, rx) = mpsc::channel();
-        let term = Term::new(Config::default(), &dimensions, EventProxy(tx));
-        Self {
-            term,
-            parser: Processor::new(),
-            pty_writes: rx,
-            cwd: crate::cwd::CwdWatcher::new(),
+        let config = Config { scrolling_history: scrollback, ..Config::default() };
+        let term = Term::new(config.clone(), &dimensions, EventProxy(tx));
+        Self { term, parser: Processor::new(), pty_writes: rx, cwd: crate::cwd::CwdWatcher::new(), config }
+    }
+
+    /// Changes how many lines of history this screen retains, for a live
+    /// config edit. Shrinking discards the oldest history beyond the new
+    /// limit; growing simply raises the ceiling, leaving what's already
+    /// retained alone.
+    pub fn set_scrollback(&mut self, scrollback: usize) {
+        if self.config.scrolling_history == scrollback {
+            return;
         }
+        self.config.scrolling_history = scrollback;
+        self.term.set_options(self.config.clone());
     }
 
     /// Feeds raw PTY output bytes into the terminal parser, updating the
@@ -122,10 +137,7 @@ impl Screen {
     /// Resizes the grid to `size`. Does not touch the PTY — pair with
     /// `Pty::resize` so the kernel/ConPTY and the parsed grid agree.
     pub fn resize(&mut self, size: Size) {
-        self.term.resize(TermSize {
-            columns: size.cols as usize,
-            lines: size.rows as usize,
-        });
+        self.term.resize(TermSize { columns: size.cols as usize, lines: size.rows as usize });
     }
 
     /// Drains any bytes the terminal needs written back to the PTY's input
@@ -289,17 +301,65 @@ impl Screen {
 mod tests {
     use super::*;
 
+    /// How far back into history `screen` can actually scroll, in rows —
+    /// scrolling is clamped to what's retained, so the resting display
+    /// offset after over-scrolling *is* the retained history size.
+    fn retained_history(screen: &mut Screen) -> usize {
+        screen.scroll_to_bottom();
+        screen.scroll(1_000_000);
+        screen.term.grid().display_offset()
+    }
+
     #[test]
     fn resize_changes_visible_row_count() {
-        let mut screen = Screen::new(Size { rows: 5, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
         screen.resize(Size { rows: 2, cols: 10 });
 
         assert_eq!(screen.visible_rows().len(), 2);
     }
 
+    /// The configured scrollback has to actually reach the grid. It didn't:
+    /// this built `Config::default()` and ignored the setting entirely, so
+    /// every pane silently retained alacritty's own 10000-line default no
+    /// matter what `general.scrollback_lines` said.
+    #[test]
+    fn the_configured_scrollback_is_what_the_grid_retains() {
+        let mut small = Screen::new(Size { rows: 3, cols: 20 }, 10);
+        let mut large = Screen::new(Size { rows: 3, cols: 20 }, 200);
+        for i in 0..500 {
+            small.advance(format!("line{i}\r\n").as_bytes());
+            large.advance(format!("line{i}\r\n").as_bytes());
+        }
+
+        assert_eq!(retained_history(&mut small), 10);
+        assert_eq!(retained_history(&mut large), 200);
+    }
+
+    #[test]
+    fn set_scrollback_applies_to_an_already_running_screen() {
+        let mut screen = Screen::new(Size { rows: 3, cols: 20 }, 200);
+        for i in 0..500 {
+            screen.advance(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(retained_history(&mut screen), 200);
+
+        // Shrinking drops the oldest history beyond the new limit...
+        screen.set_scrollback(20);
+        assert_eq!(retained_history(&mut screen), 20);
+
+        // ...and growing raises the ceiling for what arrives next, rather
+        // than resurrecting what shrinking already discarded.
+        screen.set_scrollback(100);
+        assert_eq!(retained_history(&mut screen), 20);
+        for i in 0..500 {
+            screen.advance(format!("more{i}\r\n").as_bytes());
+        }
+        assert_eq!(retained_history(&mut screen), 100);
+    }
+
     #[test]
     fn advance_updates_cwd_from_an_osc_7_sequence_alongside_the_grid() {
-        let mut screen = Screen::new(Size { rows: 5, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
         assert_eq!(screen.cwd(), None);
 
         screen.advance(b"\x1b]7;file://host/home/will/project\x07prompt$ ");
@@ -312,7 +372,7 @@ mod tests {
 
     #[test]
     fn scrolling_back_reveals_output_pushed_into_history() {
-        let mut screen = Screen::new(Size { rows: 3, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 3, cols: 20 }, 100);
         assert!(!screen.is_scrolled_back());
 
         for i in 0..9 {
@@ -332,7 +392,7 @@ mod tests {
 
     #[test]
     fn scrolling_back_past_available_history_clamps_instead_of_panicking() {
-        let mut screen = Screen::new(Size { rows: 3, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 3, cols: 20 }, 100);
         // Overflow the 3 visible rows by 2 lines, so there's a little real
         // history to land in — otherwise (no history at all) clamping to 0
         // is the *correct* behavior, not evidence either way about the
@@ -350,7 +410,7 @@ mod tests {
 
     #[test]
     fn cursor_position_query_produces_a_pty_reply() {
-        let mut screen = Screen::new(Size { rows: 5, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
         screen.advance(b"\x1b[3;5Hhi");
         screen.advance(b"\x1b[6n");
 
@@ -360,7 +420,7 @@ mod tests {
 
     #[test]
     fn renders_known_vt_sequence_into_grid() {
-        let mut screen = Screen::new(Size { rows: 5, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
         screen.advance(b"hello, pane\r\n");
 
         let rows = screen.visible_rows();
@@ -370,7 +430,7 @@ mod tests {
 
     #[test]
     fn cursor_movement_escape_positions_text() {
-        let mut screen = Screen::new(Size { rows: 5, cols: 20 });
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
         // Move cursor to row 3, column 5 (1-indexed, per CUP), then write.
         screen.advance(b"\x1b[3;5Hhi");
 

@@ -22,11 +22,13 @@ pub struct PaneSession {
 
 impl PaneSession {
     /// Spawns `shell` (or the platform default when `None`) behind a PTY of
-    /// `size`, starting in `cwd` if given (session restore), and starts a
-    /// background thread reading its output.
+    /// `size`, retaining `scrollback` lines of history, starting in `cwd` if
+    /// given (session restore), and starts a background thread reading its
+    /// output.
     pub fn spawn(
         shell: Option<&str>,
         size: pane::Size,
+        scrollback: usize,
         cwd: Option<&std::path::Path>,
         waker: crate::waker::Waker,
     ) -> anyhow::Result<Self> {
@@ -52,10 +54,7 @@ impl PaneSession {
                     }
                     Ok(n) => {
                         if crate::verbose::is_verbose(crate::verbose::Category::Pty) {
-                            eprintln!(
-                                "pane: read {n} bytes from PTY: {:?}",
-                                String::from_utf8_lossy(&buf[..n])
-                            );
+                            eprintln!("pane: read {n} bytes from PTY: {:?}", String::from_utf8_lossy(&buf[..n]));
                         }
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break;
@@ -70,7 +69,7 @@ impl PaneSession {
 
         Ok(Self {
             pty,
-            screen: pane::Screen::new(size),
+            screen: pane::Screen::new(size, scrollback),
             rx,
             exit_logged: false,
             shell: shell.map(str::to_string),
@@ -150,6 +149,12 @@ impl PaneSession {
         self.screen.scroll(lines);
     }
 
+    /// Changes how many lines of history this pane retains, for a live
+    /// config edit — see `pane::Screen::set_scrollback`.
+    pub fn set_scrollback(&mut self, scrollback: usize) {
+        self.screen.set_scrollback(scrollback);
+    }
+
     /// Starts a fresh in-grid text selection at 0-indexed (row, col).
     /// Starts a selection of the given granularity — see
     /// `pane::Screen::start_selection_of`.
@@ -221,7 +226,8 @@ mod tests {
         let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
         let mut session =
-            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop()).expect("spawn a real pane");
+            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, 100, None, crate::waker::Waker::noop())
+                .expect("spawn a real pane");
         session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
 
         let mut processes = crate::foreground_process::ForegroundProcesses::new();
@@ -245,11 +251,7 @@ mod tests {
         #[cfg(unix)]
         if session.screen().cwd().is_none() {
             let os_level = session.shell_pid().and_then(|pid| processes.cwd_of(pid));
-            assert_eq!(
-                os_level.as_deref(),
-                Some(expected.as_path()),
-                "the OS-level lookup alone should have found it"
-            );
+            assert_eq!(os_level.as_deref(), Some(expected.as_path()), "the OS-level lookup alone should have found it");
         }
     }
 
@@ -263,9 +265,14 @@ mod tests {
         let dir = std::env::temp_dir();
         let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
-        let mut session =
-            PaneSession::spawn(Some("/bin/sh"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop())
-                .expect("spawn a real pane");
+        let mut session = PaneSession::spawn(
+            Some("/bin/sh"),
+            pane::Size { rows: 24, cols: 80 },
+            100,
+            None,
+            crate::waker::Waker::noop(),
+        )
+        .expect("spawn a real pane");
         session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
 
         let mut processes = crate::foreground_process::ForegroundProcesses::new();

@@ -16,9 +16,7 @@ pub use glyph::{GlyphRasterizer, RasterizedGlyph, monospace_font_families, syste
 /// matters.
 pub fn measure_cell(font_size_px: f32, font_family: &str) -> (f32, f32) {
     let mut rasterizer = GlyphRasterizer::new();
-    let width = rasterizer
-        .advance_width('M', font_size_px, font_family)
-        .unwrap_or(font_size_px * 0.6);
+    let width = rasterizer.advance_width('M', font_size_px, font_family).unwrap_or(font_size_px * 0.6);
     (width.round(), (font_size_px * 1.25).round())
 }
 
@@ -138,18 +136,9 @@ impl GridRenderer {
             label: Some("grid-bind-group"),
             layout: &bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: globals_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&atlas.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
 
@@ -206,10 +195,7 @@ impl GridRenderer {
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -222,10 +208,7 @@ impl GridRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let quad_data: Vec<QuadVertex> = QUAD_CORNERS
-            .into_iter()
-            .map(|corner| QuadVertex { corner })
-            .collect();
+        let quad_data: Vec<QuadVertex> = QUAD_CORNERS.into_iter().map(|corner| QuadVertex { corner }).collect();
         queue.write_buffer(&quad_vbo, 0, bytemuck::cast_slice(&quad_data));
 
         let instance_capacity = 65536;
@@ -236,15 +219,7 @@ impl GridRenderer {
             mapped_at_creation: false,
         });
 
-        Self {
-            pipeline,
-            quad_vbo,
-            instance_vbo,
-            instance_capacity,
-            globals_buffer,
-            bind_group,
-            atlas,
-        }
+        Self { pipeline, quad_vbo, instance_vbo, instance_capacity, globals_buffer, bind_group, atlas }
     }
 
     /// Clears `view` to `background` and draws `rects` (cursors, dividers)
@@ -265,9 +240,7 @@ impl GridRenderer {
         queue.write_buffer(
             &self.globals_buffer,
             0,
-            bytemuck::bytes_of(&Globals {
-                screen_size: [screen_size.0 as f32, screen_size.1 as f32],
-            }),
+            bytemuck::bytes_of(&Globals { screen_size: [screen_size.0 as f32, screen_size.1 as f32] }),
         );
 
         let mut instances = Vec::new();

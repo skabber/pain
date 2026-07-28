@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.6.1
+
 - Fixed: changing the font size a few times crashed the terminal. Every
   size you passed through kept its own permanent copy of the character
   set in the glyph texture, and once that texture filled up the next

@@ -67,7 +67,7 @@ rustPlatform.buildRustPackage {
   # `cargo vendor` (which is what this hash covers) skips it and leaves the
   # patch pointing at the in-tree path — no outputHashes entry needed, as
   # long as the src filter above keeps vendor/.
-  cargoHash = "sha256-B5hDfKhTo8eXCFIhvT3Ain/QcTk0fowu6bs/XR9eJDc=";
+  cargoHash = "sha256-HXxPxe24iZOCRh6NY67d7SDQ6VFaSVS6C1nh6geOjx8=";
 
   # Only the app crate produces a binary; the other six workspace crates are
   # libraries it depends on.

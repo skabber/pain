@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v1.7.0
+
 - Fixed, Windows: starting pain opened a console window that then sat there
   for as long as the terminal was running, and a shell you launched it from
   stayed blocked until you closed it. The executable was built as a console

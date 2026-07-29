@@ -20,10 +20,14 @@ const DIVIDER_HIT_MARGIN: f32 = 4.0;
 /// "Graphite" palette (see the design-pass memory entry): a cool near-
 /// black ground with desaturated slate-gray chrome. `#262b31`.
 const DIVIDER_COLOR: [f32; 4] = [0.149, 0.169, 0.192, 1.0];
-/// `#dfe2e6` — Graphite's ink color, used for cell text and title-bar text
-/// alike (an ungrouped pane's title bar is dark enough that the same
-/// light ink reads fine there too; a grouped pane's random background
-/// needs `contrasting_text_color` instead, since it might not be).
+/// `#dfe2e6` — Graphite's ink color, for title-bar text (an ungrouped
+/// pane's title bar is dark enough that this light ink reads fine there; a
+/// grouped pane's palette-picked background needs `contrasting_text_color`
+/// instead, since it might not be).
+///
+/// Chrome only. Grid text takes its default color from the active theme's
+/// foreground — the title bar deliberately keeps a fixed look, so choosing
+/// a light theme doesn't leave the chrome looking like a different app.
 const TEXT_COLOR: [f32; 4] = [0.875, 0.886, 0.902, 1.0];
 
 /// A URL under the pointer: where to draw its underline, and what to open
@@ -43,13 +47,6 @@ struct UrlHover {
 pub struct PollOutcome {
     pub needs_redraw: bool,
     pub panes_remain: bool,
-}
-
-/// Drops `TEXT_COLOR`'s alpha channel, for use as a per-cell default color
-/// (`color::resolve`'s API works in bare RGB — alpha is always opaque for
-/// grid text, so there's nothing meaningful for a fourth channel to say).
-fn rgb3(c: [f32; 4]) -> [f32; 3] {
-    [c[0], c[1], c[2]]
 }
 
 /// Scales `settings.appearance.font_size` (a user-facing "points" value —
@@ -98,6 +95,24 @@ const TITLE_BAR_TEXT_LIGHT: [f32; 4] = TEXT_COLOR;
 /// bright grouped pane's title bar — the same hue family as the rest of
 /// the chrome rather than a plain neutral black.
 const TITLE_BAR_TEXT_DARK: [f32; 4] = [0.047, 0.055, 0.067, 1.0];
+/// Activity dot colors, both fixed regardless of the user's accent color
+/// for the same reason `BROADCAST_BORDER_COLOR` is: these are semantic
+/// signals about pane state, not decorative highlights.
+///
+/// Deliberately neither of them orange — that hue already means "receiving
+/// broadcast input" elsewhere in the same chrome.
+const ACTIVITY_OUTPUT_COLOR: [f32; 4] = [0.29, 0.62, 0.85, 1.0];
+const ACTIVITY_BELL_COLOR: [f32; 4] = [0.90, 0.30, 0.30, 1.0];
+/// The activity indicator, drawn as an ordinary glyph through the same
+/// monospace grid the title text uses — the identical approach
+/// `CLOSE_BUTTON_GLYPH` already takes.
+///
+/// A real round dot, not a square. The renderer only draws rectangles, so
+/// the first version emitted a `SolidRect` and was, accurately, a small
+/// square; a circle would otherwise need either a shader change or an
+/// alpha mask, and the font already has this glyph.
+pub(crate) const ACTIVITY_GLYPH: char = '●';
+
 /// A grouped pane's title bar background is picked from this set, keyed by
 /// a hash of the group's name (stable across reloads/restarts — the same
 /// group name always gets the same color, rather than actually re-rolling
@@ -241,8 +256,7 @@ impl Graphics {
             );
         }
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
 
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -285,8 +299,7 @@ impl Graphics {
         // the same as the WSLg cursor-theme quirks already documented in
         // project memory: not chased, just not attempted.
         let caps = surface.get_capabilities(&adapter);
-        config.alpha_mode =
-            preferred_alpha_mode(&caps.alpha_modes, platform::is_wsl(), cfg!(target_os = "macos"));
+        config.alpha_mode = preferred_alpha_mode(&caps.alpha_modes, platform::is_wsl(), cfg!(target_os = "macos"));
         if config.alpha_mode == wgpu::CompositeAlphaMode::Opaque
             && crate::verbose::is_verbose(crate::verbose::Category::General)
         {
@@ -322,7 +335,7 @@ impl Graphics {
         // doc comment). A pane-count mismatch means a corrupted or
         // otherwise unusable file; treated the same as no session at all
         // rather than restoring a partial/misaligned guess.
-        let (layout, panes_order, pane_states): (Layout, Vec<PaneId>, Vec<Option<session::PaneState>>) =
+        let (mut layout, panes_order, pane_states): (Layout, Vec<PaneId>, Vec<Option<session::PaneState>>) =
             match session.and_then(|s| {
                 let (layout, order) = Layout::from_snapshot(&s.layout);
                 (order.len() == s.panes.len()).then_some((layout, order, s.panes))
@@ -342,10 +355,7 @@ impl Graphics {
         // wrong size before its very first paint is harmless, the same as
         // an ordinary resize.
         let root_size = Self::rect_to_size(
-            Self::content_rect(
-                Rect { x: 0.0, y: 0.0, width: size.width as f32, height: size.height as f32 },
-                cell,
-            ),
+            Self::content_rect(Rect { x: 0.0, y: 0.0, width: size.width as f32, height: size.height as f32 }, cell),
             cell,
         );
         if crate::verbose::is_verbose(crate::verbose::Category::General) {
@@ -365,24 +375,38 @@ impl Graphics {
         router.keymap.apply_overrides(&settings.keybindings);
 
         let mut panes = HashMap::new();
+        let mut failed = Vec::new();
         for (pane_id, state) in panes_order.iter().zip(&pane_states) {
             let cwd = state.as_ref().map(|s| s.cwd.as_path());
             // A saved explicit shell (e.g. a past "Swap shell") wins;
             // otherwise fall back to whatever the *current* configured
             // default is, same as a pane that's never been touched.
             let shell = state.as_ref().and_then(|s| s.shell.as_deref()).or_else(|| Self::shell(&settings));
-            match PaneSession::spawn(shell, root_size, cwd, waker.clone()) {
+            match PaneSession::spawn(shell, root_size, settings.general.scrollback_lines, cwd, waker.clone()) {
                 Ok(session) => {
                     panes.insert(*pane_id, session);
                     if let Some(group) = state.as_ref().and_then(|s| s.group.clone()) {
                         router.assign_to_group(*pane_id, group);
                     }
                 }
-                Err(err) => eprintln!("pane: failed to spawn: {err:#}"),
+                Err(err) => {
+                    eprintln!("pane: failed to spawn: {err:#}");
+                    failed.push(*pane_id);
+                }
             }
         }
         if panes.is_empty() {
             anyhow::bail!("failed to spawn any pane");
+        }
+        // A pane with no shell behind it must not stay in the tree. It
+        // would render as a blank rect with no title bar (everything in
+        // `redraw` is keyed off a `PaneSession` that doesn't exist), `poll`
+        // would never reap it (that only walks `self.panes`), and focus
+        // could still land on it — where every keystroke would silently go
+        // nowhere. Removing it lets the surviving panes take the space, the
+        // same as any other close.
+        for pane in failed {
+            layout.close(pane);
         }
         // The tree's first pane, restored or not — session restore
         // doesn't track which pane had focus (not part of what CONOPS §5g
@@ -479,8 +503,15 @@ impl Graphics {
         }
 
         match config::Config::try_load(&config::Config::default_path()) {
-            Ok(new_settings) if new_settings == self.settings => {}
-            Ok(new_settings) => self.apply_settings(new_settings),
+            // Reported here, not inside `try_load`: one save is several
+            // filesystem events, so anything the load had to clamp would
+            // otherwise be complained about once per event rather than once
+            // per actual change.
+            Ok((new_settings, _)) if new_settings == self.settings => {}
+            Ok((new_settings, adjustments)) => {
+                config::report(&adjustments);
+                self.apply_settings(new_settings);
+            }
             Err(err) => {
                 eprintln!("config: edit not applied, keeping previous settings: {err}");
             }
@@ -496,6 +527,7 @@ impl Graphics {
         let font_size_changed = new_settings.appearance.font_size != self.settings.appearance.font_size;
         let font_family_changed = new_settings.appearance.font_family != self.settings.appearance.font_family;
         let keybindings_changed = new_settings.keybindings != self.settings.keybindings;
+        let scrollback_changed = new_settings.general.scrollback_lines != self.settings.general.scrollback_lines;
         if crate::verbose::is_verbose(crate::verbose::Category::General) {
             eprintln!("config: reloaded {new_settings:?}");
         }
@@ -506,6 +538,15 @@ impl Graphics {
                 &self.settings.appearance.font_family,
             );
             self.resize_panes_to_geometry();
+        }
+        if scrollback_changed {
+            // Applied to every pane that's already open, not just ones
+            // created afterwards — the same live-edit expectation every
+            // other setting here meets.
+            let scrollback = self.settings.general.scrollback_lines;
+            for session in self.panes.values_mut() {
+                session.set_scrollback(scrollback);
+            }
         }
         if keybindings_changed {
             // Rebuilt from scratch each time, not patched incrementally, so
@@ -571,19 +612,11 @@ impl Graphics {
     }
 
     fn area(&self) -> Rect {
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            width: self.config.width as f32,
-            height: self.config.height as f32,
-        }
+        Rect { x: 0.0, y: 0.0, width: self.config.width as f32, height: self.config.height as f32 }
     }
 
     fn rect_to_size(rect: Rect, cell: (f32, f32)) -> pane::Size {
-        pane::Size {
-            rows: ((rect.height / cell.1) as u16).max(1),
-            cols: ((rect.width / cell.0) as u16).max(1),
-        }
+        pane::Size { rows: ((rect.height / cell.1) as u16).max(1), cols: ((rect.width / cell.0) as u16).max(1) }
     }
 
     /// Height of a pane's title bar, scaled to the current font size so the
@@ -600,12 +633,7 @@ impl Graphics {
     /// itself is chrome drawn separately in `redraw`.
     fn content_rect(rect: Rect, cell: (f32, f32)) -> Rect {
         let title_bar = Self::title_bar_height(cell);
-        Rect {
-            x: rect.x,
-            y: rect.y + title_bar,
-            width: rect.width,
-            height: (rect.height - title_bar).max(0.0),
-        }
+        Rect { x: rect.x, y: rect.y + title_bar, width: rect.width, height: (rect.height - title_bar).max(0.0) }
     }
 
     /// The clickable close-button rect within a pane's title bar — a
@@ -627,6 +655,17 @@ impl Graphics {
             width: side,
             height: side,
         }
+    }
+
+    /// Width reserved at the title bar's left edge for the activity dot.
+    ///
+    /// Reserved unconditionally, whether or not a dot is currently drawn:
+    /// the group name starts after it, and letting the slot collapse when
+    /// idle would make every label in the bar jump sideways the moment a
+    /// background pane produced output — motion that reads as a glitch, and
+    /// exactly where the eye is being drawn.
+    fn activity_slot_width(cell: (f32, f32)) -> f32 {
+        cell.0 + TITLE_BAR_PADDING
     }
 
     /// Resizes every currently-visible pane's PTY and grid to match the
@@ -758,7 +797,8 @@ impl Graphics {
             .rect;
         let size = Self::rect_to_size(Self::content_rect(rect, self.cell), self.cell);
 
-        match PaneSession::spawn(Self::shell(&self.settings), size, None, self.waker.clone()) {
+        let scrollback = self.settings.general.scrollback_lines;
+        match PaneSession::spawn(Self::shell(&self.settings), size, scrollback, None, self.waker.clone()) {
             Ok(session) => {
                 self.panes.insert(new_pane, session);
                 self.focused = new_pane;
@@ -766,6 +806,11 @@ impl Graphics {
             Err(err) => {
                 eprintln!("pane: failed to spawn split: {err:#}");
                 self.layout.close(new_pane);
+                // Undoing the split has to undo its sizing too. Every
+                // visible pane was already resized for the split above, so
+                // without this the pane that was split keeps a grid sized
+                // for half the space while drawing at full width.
+                self.resize_panes_to_geometry();
             }
         }
     }
@@ -797,7 +842,8 @@ impl Graphics {
         };
         let size = Self::rect_to_size(Self::content_rect(rect, self.cell), self.cell);
 
-        match PaneSession::spawn(shell, size, None, self.waker.clone()) {
+        let scrollback = self.settings.general.scrollback_lines;
+        match PaneSession::spawn(shell, size, scrollback, None, self.waker.clone()) {
             Ok(session) => {
                 // Replacing the map entry drops the old `PaneSession`,
                 // whose `Pty::drop` kills the old shell — no explicit kill
@@ -988,8 +1034,11 @@ impl Graphics {
                     rect.y + rect.height + DIVIDER_HIT_MARGIN,
                 ),
             };
-            (pos.0 >= min_x && pos.0 < max_x && pos.1 >= min_y && pos.1 < max_y)
-                .then_some((d.split, d.orientation, d.axis_extent))
+            (pos.0 >= min_x && pos.0 < max_x && pos.1 >= min_y && pos.1 < max_y).then_some((
+                d.split,
+                d.orientation,
+                d.axis_extent,
+            ))
         })
     }
 
@@ -1003,10 +1052,7 @@ impl Graphics {
     /// begins a drag if one is hit. Returns whether a drag started.
     pub fn begin_drag(&mut self, pos: (f32, f32)) -> bool {
         if crate::verbose::is_verbose(crate::verbose::Category::Mouse) {
-            eprintln!(
-                "mouse: begin_drag at {pos:?}, hit={:?}",
-                self.divider_hit(pos).map(|(_, o, _)| o)
-            );
+            eprintln!("mouse: begin_drag at {pos:?}, hit={:?}", self.divider_hit(pos).map(|(_, o, _)| o));
         }
         match self.divider_hit(pos) {
             Some(hit) => {
@@ -1085,7 +1131,25 @@ impl Graphics {
         let pane = self.pane_at(pos)?;
         let (col, row) = self.cell_at(pane, pos)?;
         let session = self.panes.get(&pane)?;
-        let cells = session.screen().visible_cells();
+        let screen = session.screen();
+
+        // An OSC 8 hyperlink wins over pattern matching: the program stated
+        // the target outright, so there's nothing to infer, and the visible
+        // text needn't look like a URL at all (`ls --hyperlink` labels a
+        // link with the plain filename). Falling back the other way would
+        // mean ignoring an explicit answer in favour of a guess.
+        if let Some(link) = screen.hyperlink_at(row, col) {
+            // Scheme-checked all the same — see `url::is_allowed_scheme`. A
+            // disallowed target isn't a reason to fall through to pattern
+            // matching either: the program already told us what this text
+            // means, and guessing something else from it would be worse.
+            if crate::url::is_allowed_scheme(&link.uri) {
+                return Some(UrlHover { pane, row, start_col: link.start, end_col: link.end, url: link.uri });
+            }
+            return None;
+        }
+
+        let cells = screen.visible_cells();
         let line: String = cells.get(row)?.iter().map(|c| c.c).collect();
         let m = crate::url::match_at_column(&line, col)?;
         Some(UrlHover { pane, row, start_col: m.start, end_col: m.end, url: m.url })
@@ -1123,13 +1187,42 @@ impl Graphics {
         self.mouse_gesture.is_some()
     }
 
+    /// Ends every gesture a left-button press can start — a divider drag, a
+    /// text selection, or a mouse report the pane's program is expecting a
+    /// release for. Returns whether any of them was actually live, so the
+    /// caller only repaints when something changed.
+    ///
+    /// Exists because those three used to be ended only from the
+    /// button-release branch that pane input goes through, which the UI
+    /// overlay can swallow: `egui-winit` reports a press *and* a release as
+    /// "consumed" whenever the pointer is over an open menu or the settings
+    /// panel. Grab a divider outside the panel, drag across it, release
+    /// there, and nothing ever ended the drag — it stayed latched to the
+    /// pointer, resizing the split on every later mouse move with no button
+    /// held. Losing window focus mid-drag (alt-tab) did the same, since no
+    /// release is delivered at all. Both paths call this now.
+    pub fn end_pointer_gestures(&mut self, pos: (f32, f32), modifiers: crate::mouse::Modifiers) -> bool {
+        let was_active = self.is_dragging() || self.is_selecting() || self.is_mouse_reporting();
+        // Still reported, even on focus loss: a program tracking the mouse
+        // needs the release or it goes on believing the button is down.
+        self.mouse_release(pos, crate::mouse::Button::Left, modifiers);
+        self.end_drag();
+        self.end_selection();
+        was_active
+    }
+
     /// Attempts to start forwarding a mouse press to whichever pane is under
     /// `pos`, if that pane's program has turned on mouse reporting. Returns
     /// whether it engaged — callers should skip their own click handling
     /// (e.g. starting a text selection) for this press when it did, since
     /// the grid cell the click landed on belongs to the program now, not
     /// local chrome.
-    pub fn mouse_press(&mut self, pos: (f32, f32), button: crate::mouse::Button, modifiers: crate::mouse::Modifiers) -> bool {
+    pub fn mouse_press(
+        &mut self,
+        pos: (f32, f32),
+        button: crate::mouse::Button,
+        modifiers: crate::mouse::Modifiers,
+    ) -> bool {
         let Some(pane) = self.pane_at(pos) else { return false };
         let Some(mode) = self.panes.get(&pane).map(|s| s.screen().mode()) else { return false };
         if !crate::mouse::wants_report(mode, crate::mouse::Kind::Press, false) {
@@ -1149,7 +1242,12 @@ impl Graphics {
     /// Forwards a release for the pane a matching `mouse_press` gesture is
     /// still open for, ending the gesture. A no-op (returns `false`) if no
     /// gesture is open or it was for a different button.
-    pub fn mouse_release(&mut self, pos: (f32, f32), button: crate::mouse::Button, modifiers: crate::mouse::Modifiers) -> bool {
+    pub fn mouse_release(
+        &mut self,
+        pos: (f32, f32),
+        button: crate::mouse::Button,
+        modifiers: crate::mouse::Modifiers,
+    ) -> bool {
         let Some((pane, gesture_button)) = self.mouse_gesture.take() else { return false };
         if gesture_button != button {
             return false;
@@ -1292,10 +1390,7 @@ impl Graphics {
     /// Whether `pane`'s running program has asked for bracketed paste. See
     /// `crate::paste` for what that changes.
     fn pane_wants_bracketed_paste(&self, pane: PaneId) -> bool {
-        self.panes
-            .get(&pane)
-            .map(|session| session.screen().wants_bracketed_paste())
-            .unwrap_or(false)
+        self.panes.get(&pane).map(|session| session.screen().wants_bracketed_paste()).unwrap_or(false)
     }
 
     /// Pastes the system clipboard into `pane`. Sends immediately when
@@ -1367,7 +1462,8 @@ impl Graphics {
         if let Some(preview) = self.ui.live_preview(&self.settings) {
             self.apply_settings(preview);
         }
-        if self.foreground_processes.maybe_refresh() && crate::verbose::is_verbose(crate::verbose::Category::Foreground) {
+        if self.foreground_processes.maybe_refresh() && crate::verbose::is_verbose(crate::verbose::Category::Foreground)
+        {
             // One line per pane, right after each scan (every ~500ms) —
             // enough to see the sequence of transitions without spamming
             // once per frame.
@@ -1386,10 +1482,29 @@ impl Graphics {
         }
 
         let mut exited = Vec::new();
+        let focused = self.focused;
         for (pane, session) in self.panes.iter_mut() {
-            if session.pump() {
+            let pumped = session.pump();
+            if pumped.changed {
                 outcome.needs_redraw = true;
             }
+
+            // Activity is diffed rather than assumed dirty, the same way
+            // titles are below: this runs every wake, and the overwhelmingly
+            // common case is "nothing changed". Focusing a pane clears its
+            // dot, which is a repaint nothing else would ask for — the click
+            // that moved focus was handled a frame earlier.
+            let before = session.activity();
+            let signals = crate::activity::Signals {
+                output: pumped.output,
+                bell: pumped.bell,
+                input: session.take_received_input(),
+            };
+            session.update_activity(*pane == focused, signals);
+            if session.activity() != before {
+                outcome.needs_redraw = true;
+            }
+
             if session.has_exited() {
                 exited.push(*pane);
             }
@@ -1464,10 +1579,8 @@ impl Graphics {
     /// GPU work unconditionally, so callers should only reach it when
     /// something actually needs repainting.
     pub fn redraw(&mut self) -> bool {
-
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
                 return true;
@@ -1477,9 +1590,7 @@ impl Graphics {
             | wgpu::CurrentSurfaceTexture::Validation => return true,
         };
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let geometry = self.layout.geometry(self.area(), DIVIDER_THICKNESS);
         let cell = self.cell;
@@ -1490,6 +1601,12 @@ impl Graphics {
         // "colored" background rect would visibly seam against the real
         // one drawn behind it.
         let background_rgb = self.settings.appearance.background_rgb();
+        // The theme supplies both the 16 ANSI slots and what a cell left at
+        // its default foreground resolves to. Read fresh each frame, like
+        // every other appearance setting, so switching theme restyles
+        // already-running panes with nothing to invalidate.
+        let palette = self.settings.appearance.palette();
+        let foreground_rgb = self.settings.appearance.foreground_rgb();
         // The cursor and selection highlight both use the user's chosen
         // accent color (Settings' "Accent color") rather than a fixed
         // constant — unlike the broadcast-target border, which is a fixed
@@ -1526,6 +1643,10 @@ impl Graphics {
         let router = &self.router;
         let hovered_url = self.hovered_url.as_ref();
         let foreground_processes = &self.foreground_processes;
+        let ligatures = self.settings.appearance.ligatures;
+        // Filled only in ligature mode; the per-character path leaves it
+        // empty and costs nothing.
+        let mut pane_runs: Vec<render::GlyphRun> = Vec::new();
         let glyphs: Vec<render::GlyphCell> = geometry
             .panes
             .iter()
@@ -1580,10 +1701,28 @@ impl Graphics {
                     c,
                     color: title_bar_text,
                 }));
+                // Activity dot, in its reserved slot ahead of the group
+                // name. Nothing is drawn when the pane is idle — the slot
+                // stays reserved regardless (see `activity_slot_width`).
+                let activity_color = match session.activity() {
+                    crate::activity::Activity::Idle => None,
+                    crate::activity::Activity::Output => Some(ACTIVITY_OUTPUT_COLOR),
+                    crate::activity::Activity::Bell => Some(ACTIVITY_BELL_COLOR),
+                };
+                if let Some(color) = activity_color {
+                    pane_glyphs.push(render::GlyphCell {
+                        x: full.x + TITLE_BAR_PADDING,
+                        y: title_y,
+                        c: ACTIVITY_GLYPH,
+                        color,
+                    });
+                }
+
                 if let Some(g) = &group {
                     let name: String = g.0.chars().take(max_chars).collect();
+                    let name_x = full.x + TITLE_BAR_PADDING + Self::activity_slot_width(cell);
                     pane_glyphs.extend(name.chars().enumerate().map(|(i, c)| render::GlyphCell {
-                        x: full.x + TITLE_BAR_PADDING + i as f32 * cell.0,
+                        x: name_x + i as f32 * cell.0,
                         y: title_y,
                         c,
                         color: title_bar_text,
@@ -1631,7 +1770,15 @@ impl Graphics {
                     });
                 }
 
+                // Only meaningful for the pane that has it, and only while
+                // that pane is showing live output — the cursor tracks the
+                // live screen, so it corresponds to nothing visible in
+                // scrolled-back history.
+                let cursor = (pane_rect.pane == focused && !screen.is_scrolled_back()).then(|| screen.cursor());
+
                 for (row, row_cells) in cells.into_iter().enumerate() {
+                    let mut run_cells: Vec<crate::run::RunCell> = Vec::new();
+
                     for (col, rc) in row_cells.into_iter().enumerate() {
                         // SGR reverse-video (`Flags::INVERSE`) swaps which
                         // side of the cell each color paints — handled by
@@ -1644,13 +1791,36 @@ impl Graphics {
                         let y = origin.y + row as f32 * cell.1;
 
                         if !color::is_default_background(bg_src) {
-                            let [r, g, b] = color::resolve(bg_src, rc.flags, false, background_rgb);
-                            rects.push(render::SolidRect { x, y, width: cell.0, height: cell.1, color: [r, g, b, 1.0] });
+                            let [r, g, b] = color::resolve(bg_src, rc.flags, false, background_rgb, &palette);
+                            rects.push(render::SolidRect {
+                                x,
+                                y,
+                                width: cell.0,
+                                height: cell.1,
+                                color: [r, g, b, 1.0],
+                            });
                         }
 
-                        if rc.c != ' ' {
-                            let [r, g, b] = color::resolve(fg_src, rc.flags, true, rgb3(TEXT_COLOR));
+                        let [r, g, b] = color::resolve(fg_src, rc.flags, true, foreground_rgb, &palette);
+                        if ligatures {
+                            // Every cell, spaces included: `run::split` needs
+                            // them to know where runs end.
+                            run_cells.push(crate::run::RunCell { c: rc.c, color: [r, g, b, 1.0] });
+                        } else if rc.c != ' ' {
                             pane_glyphs.push(render::GlyphCell { x, y, c: rc.c, color: [r, g, b, 1.0] });
+                        }
+                    }
+
+                    if ligatures {
+                        let cursor_col = cursor.filter(|(cursor_row, _)| *cursor_row == row).map(|(_, col)| col);
+                        let y = origin.y + row as f32 * cell.1;
+                        for run in crate::run::split(&run_cells, cursor_col) {
+                            pane_runs.push(render::GlyphRun {
+                                x: origin.x + run.start_col as f32 * cell.0,
+                                y,
+                                text: run.text,
+                                color: run.color,
+                            });
                         }
                     }
                 }
@@ -1667,8 +1837,7 @@ impl Graphics {
         // benefit (the compositor never blends it with anything).
         let transparency = if platform::is_wsl() { 1.0 } else { self.settings.appearance.transparency.clamp(0.0, 1.0) };
         let [bg_r, bg_g, bg_b] = background_rgb;
-        let background =
-            wgpu::Color { r: bg_r as f64, g: bg_g as f64, b: bg_b as f64, a: transparency as f64 };
+        let background = wgpu::Color { r: bg_r as f64, g: bg_g as f64, b: bg_b as f64, a: transparency as f64 };
         self.grid.render(
             &self.device,
             &self.queue,
@@ -1679,6 +1848,7 @@ impl Graphics {
             background,
             rects.into_iter(),
             glyphs.into_iter(),
+            pane_runs.into_iter(),
         );
 
         let group_names = self.router.group_names();
@@ -1893,7 +2063,14 @@ fn contrasting_text_color(bg: [f32; 4]) -> [f32; 4] {
     if luminance > 0.5 { TITLE_BAR_TEXT_DARK } else { TITLE_BAR_TEXT_LIGHT }
 }
 
-fn rects_push_cursor(rects: &mut Vec<render::SolidRect>, origin: Rect, cell: (f32, f32), row: usize, col: usize, color: [f32; 4]) {
+fn rects_push_cursor(
+    rects: &mut Vec<render::SolidRect>,
+    origin: Rect,
+    cell: (f32, f32),
+    row: usize,
+    col: usize,
+    color: [f32; 4],
+) {
     rects.push(render::SolidRect {
         x: origin.x + col as f32 * cell.0,
         y: origin.y + row as f32 * cell.1,
@@ -1949,13 +2126,7 @@ fn push_selection(
 /// bottom, left, right edges), inset so the border sits just inside the
 /// pane rather than overlapping the divider.
 fn push_border(rects: &mut Vec<render::SolidRect>, rect: Rect, thickness: f32, color: [f32; 4]) {
-    rects.push(render::SolidRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: thickness,
-        color,
-    });
+    rects.push(render::SolidRect { x: rect.x, y: rect.y, width: rect.width, height: thickness, color });
     rects.push(render::SolidRect {
         x: rect.x,
         y: rect.y + rect.height - thickness,
@@ -1963,13 +2134,7 @@ fn push_border(rects: &mut Vec<render::SolidRect>, rect: Rect, thickness: f32, c
         height: thickness,
         color,
     });
-    rects.push(render::SolidRect {
-        x: rect.x,
-        y: rect.y,
-        width: thickness,
-        height: rect.height,
-        color,
-    });
+    rects.push(render::SolidRect { x: rect.x, y: rect.y, width: thickness, height: rect.height, color });
     rects.push(render::SolidRect {
         x: rect.x + rect.width - thickness,
         y: rect.y,

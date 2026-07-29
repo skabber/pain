@@ -115,11 +115,7 @@ impl Router {
             BroadcastMode::Off => HashSet::from([focused]),
             BroadcastMode::All => all_panes.iter().copied().collect(),
             BroadcastMode::Group => match self.group_of(focused) {
-                Some(group) => self
-                    .groups
-                    .get(&group)
-                    .cloned()
-                    .unwrap_or_else(|| HashSet::from([focused])),
+                Some(group) => self.groups.get(&group).cloned().unwrap_or_else(|| HashSet::from([focused])),
                 None => HashSet::from([focused]),
             },
         }
@@ -153,10 +149,7 @@ mod tests {
         let mut router = Router::new();
         router.broadcast_mode = BroadcastMode::All;
         let all = vec![pane(0), pane(1), pane(2)];
-        assert_eq!(
-            router.broadcast_targets(pane(0), &all),
-            HashSet::from([pane(0), pane(1), pane(2)])
-        );
+        assert_eq!(router.broadcast_targets(pane(0), &all), HashSet::from([pane(0), pane(1), pane(2)]));
     }
 
     #[test]

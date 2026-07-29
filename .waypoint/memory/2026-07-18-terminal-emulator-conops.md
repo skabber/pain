@@ -4053,3 +4053,302 @@
   a completely broken waker. The decisive test is output arriving with no
   input at all (`sleep 3; echo hi`): if that appears unprompted, the
   reader thread genuinely woke the sleeping loop.
+
+  **Update — 2026-07-28:** Developer asked to look at herdr.dev and
+  ghostty.org and take what's worth taking. Researched both properly
+  (fetched their docs; ghostty.org's landing page truncates, so pulled
+  `/docs/about`, `/docs/features`, `/docs/features/shell-integration`).
+
+  **Herdr** is an *agent* multiplexer — detachable persistent sessions,
+  semantic agent state (blocked/working/done/idle), plugin marketplace,
+  JSON socket API. All three pillars are explicit CONOPS §6/§7 non-goals,
+  so almost nothing transfers. The one genuinely good idea, stripped of
+  the agent framing: **pane activity indicators**. Built it.
+
+  **Ghostty** is much closer to our lane. Proposed, ranked: themes,
+  OSC 8, bell+activity, OSC 133, `+` subcommands. Developer's calls:
+  - **OSC 133 skipped** — "don't want to invent functionality that's not
+    naturally part of the shells people use, or that Terminator/iTerm2
+    don't already support." (Noted to them that iTerm2 *does* support it —
+    it originated there — but bare bash/zsh don't emit it, so the decision
+    stands on the other half of the criterion. Don't re-raise.)
+  - **Subcommands declined** — "users can figure it out the hard way."
+  - **Images declined** — "silly."
+  - **Ligatures wanted** — a real user request — but Settings checkbox,
+    off by default.
+
+  **Correction worth remembering: I overstated a wide-char bug.** I
+  flagged CJK/emoji double-width handling as a possible correctness bug
+  and ranked it #1. Developer pushed back ("this is monospaced, everything
+  is the same width. wtf"). Checked properly: `alacritty_terminal` writes
+  a blank `WIDE_CHAR_SPACER` cell after every wide char, so our loop draws
+  the wide glyph at column N, skips the spacer, and the next char lands at
+  N+2 — **layout is correct by accident**. The only real issue is
+  cosmetic: emoji render as flat monochrome silhouettes because
+  `glyph.rs` discards the color bitmap and keeps only alpha. Lesson: check
+  before ranking something #1, especially when contradicting the
+  developer's mental model of their own code.
+
+  **Shipped this session (all uncommitted, awaiting review):**
+
+  1. **Pane activity + bell.** `pane::term`'s `EventProxy` now forwards
+     `Event::Bell` alongside `PtyWrite` over one channel as a `ScreenEvent`
+     enum — bell was previously discarded outright. Both `take_pty_writes`
+     and `take_bell` call a shared `drain_events()` first; draining
+     independently inside each would mean whichever ran first silently ate
+     the other's events (two tests guard exactly that ordering hazard).
+     `crates/app/src/activity.rs` (new) is the pure state machine: Idle /
+     Output / Bell, bell outranks output, focus always resets. `pump()` now
+     returns `PumpOutcome { changed, output, bell }` instead of a bare
+     bool. Dot renders in a title-bar slot reserved **unconditionally**
+     (`activity_slot_width`) so labels don't jump sideways when a dot
+     appears. Diffed, not assumed dirty — same discipline as `refresh_titles`.
+     End-to-end verified with a real `sh` printing BEL.
+  2. **Themes.** `crates/config/src/themes.rs` — **generated**, 601 themes,
+     150KB, compiled in (no runtime I/O; works identically across deb/RPM/
+     AppImage/.app/zip). Source: iTerm2-Color-Schemes' *alacritty* exports,
+     whose color model is exactly ours. MIT, verified by fetching the
+     LICENSE — note its caveat that per-theme copyright stays with each
+     theme's author. Vendored to `assets/themes/` with `generate.py` +
+     README. Upstream has its own `Graphite.toml` which **collides with our
+     built-in default name**; generator drops and *reports* it rather than
+     emitting a duplicate (`find` would silently prefer one). Our Graphite
+     is defined in the generator, not vendored, so re-vendoring upstream
+     can never restyle people who never picked a theme.
+     `color.rs::resolve` now takes a `&Palette` instead of a hardcoded
+     const; **256-color cube/ramp stays unthemed** (only slots 0-15 follow
+     the theme — universal convention, a program asking for index 200 wants
+     that exact color). `background_color` became an override with empty =
+     follow theme, so existing configs that set it keep winning. Settings
+     picker is filterable and capped at 100 with a "keep typing" note —
+     silent truncation would read as "that's all there is".
+  3. **OSC 8 hyperlinks.** `alacritty_terminal` already parses these and
+     stores them per-cell; we were simply never reading them.
+     `Screen::hyperlink_at(row, col)` is a **point query**, deliberately not
+     a `RenderCell` field — that would add a refcount bump per cell per
+     frame for something almost always absent. Span expansion compares
+     `Hyperlink` by value, which covers *id and URI*, so two adjacent runs
+     sharing a URI stay separate links.
+     **Security call worth remembering:** OSC 8 lets output declare any
+     target, and `ls --hyperlink` emits `file://` — a scheme `url.rs`
+     deliberately excludes. Rather than silently widen what Ctrl+click can
+     open, added `url::is_allowed_scheme` and applied the *same* allowlist
+     to OSC 8. Cost: `ls --hyperlink` links aren't clickable. Flagged to
+     the developer as their call to relax.
+  4. **Ligatures, opt-in.** Kept as a **second rendering path**, not a
+     replacement — the per-char path is what an idle terminal spends
+     nothing on, and the v1.5 idle-cost work shouldn't regress for people
+     who leave ligatures off. `glyph.rs` gained `shape_run` (cached per run
+     text, cleared on font change, capped at 4096) and `rasterize_key`;
+     atlas keyed by a `GlyphKey::{Char, Shaped}` enum since one shaped
+     glyph can stand for several chars. `crates/app/src/run.rs` (new) is
+     the pure splitter: break on color change (a ligature is one glyph and
+     carries one color), on whitespace, and **around the cursor** (else you
+     can't tell which half of `!=` you're editing).
+     **Best test available here:** no ligature font is installed, so
+     substitution can't be demonstrated locally — but the property that
+     actually matters is testable and is verified: with DejaVu Sans Mono,
+     shaped runs land within 1px of the per-char cell positions. Proved the
+     test wasn't silently skipping by temporarily turning its font-missing
+     early-return into a panic and confirming it still passed.
+
+  **Declined and reported instead: color emoji.** Now that the atlas work
+  is done the cost is concrete — the atlas is `R8Unorm` coverage-only, so
+  color glyphs need an RGBA texture (2048² × 4 = 16MB, up from 4MB, for
+  *every* user), plus a per-instance flag and a fragment-shader branch
+  touching the premultiplied-alpha handling that was hard-won across three
+  platforms. Bad trade to make unilaterally for a cosmetic feature; left as
+  the developer's call.
+
+  **Verification:** workspace build + clippy clean, 219 tests across the
+  workspace (app 103, pane 51, config 28, layout 25, router 24, render 14,
+  session 4), smoke launches clean both with defaults and with
+  `ligatures = true` + `theme = "Dracula"`. **Not visually verified** —
+  `import` can't grab the WSLg root window (same documented WSL2 display
+  quirk class), so the activity dot, the theme picker, the Settings
+  checkbox, and ligature rendering all need the developer's real hardware.
+
+  **Update — 2026-07-28, continued:** Developer overruled the color-emoji
+  deferral ("all the other terminals do it. No reason for us not to").
+  Built it. Two things worth remembering.
+
+  **1. The design is cheaper than what I'd costed.** I had quoted "RGBA
+  atlas, 16MB up from 4MB". Wrong shape: widening the *single* atlas to
+  RGBA also quarters how many ordinary text glyphs fit before a repack,
+  which is a real regression for CJK/symbol-heavy output — paid by people
+  not using emoji. Instead: a **second, small RGBA atlas**
+  (`COLOR_ATLAS_SIZE = 1024`, 4MB) beside the untouched 2048² coverage
+  atlas. Text capacity unchanged, 8MB total. `ShelfPacker` gained a
+  `size` field; `AtlasEntry` gained `colored`; `Instance` gained a
+  `colored: f32`; shader binding 3 is the color texture and `fs_main`
+  branches on the flag. Color texels are premultiplied **on upload**
+  (`glyph::premultiply`, rounds to nearest — truncating darkens
+  antialiased edges), because swash hands back *straight* RGBA (verified
+  against cosmic-text's own `SwashCache`, which reads it that way) while
+  our pipeline is premultiplied throughout for the Windows
+  DirectComposition reason.
+
+  **2. A bug that would have shipped the whole feature invisible.**
+  After everything built and the color path was unit-tested by naming
+  "Noto Color Emoji" explicitly, I probed the path the app *actually*
+  uses — the user's configured monospace family — and got
+  `is_color=false`. Traced it: cosmic-text font fallback resolves U+1F600
+  to **DejaVu Sans**, which carries monochrome outlines for many emoji,
+  and stops there; the color font sitting right beside it is never
+  reached. So every emoji would still have rendered as a silhouette and
+  the entire feature would have looked like it did nothing.
+  Fix: `EMOJI_FAMILIES` + `is_emoji_presentation` + `family_for` — an
+  all-emoji glyph or run is rendered with the first installed color emoji
+  family (resolved once from the font DB and cached), rather than left to
+  fallback. Regression test
+  `an_emoji_renders_in_color_even_when_a_monospace_family_was_asked_for`
+  pins exactly this.
+  **Lesson: test the path the app takes, not the path that's convenient
+  to test.** Naming the font explicitly proved the decoder worked and
+  proved nothing about the feature.
+
+  **Deliberate scope limit:** `is_emoji_presentation` covers only the
+  astral blocks (U+1F300–U+1FAFF). U+2600–U+27BF (`✓ ✗ ★ ➜`) is
+  excluded on purpose — those have emoji forms but terminal programs use
+  them as text constantly, and routing them to an emoji font would turn a
+  passing test suite into colored pictures and break single-width
+  alignment. Tested both directions.
+
+  **Verification:** installed Noto Color Emoji **user-locally**
+  (`~/.local/share/fonts`, no root, no repo change) specifically so this
+  could be tested for real rather than shipped blind. Emoji tests assert
+  genuine RGBA with differing channels, premultiplication invariant
+  (no channel above its own alpha), correct atlas routing, and color-atlas
+  exhaustion/repack — the last two on a **real wgpu device**, since a bad
+  `bytes_per_row` for the RGBA format is a validation crash no pure-logic
+  test would catch. Proved the emoji tests weren't silently skipping by
+  turning their font-missing early-return into a panic and confirming they
+  still passed. Workspace build + clippy clean (native and Windows
+  cross-target), **259 tests**, smoke launch clean. Still unverified
+  visually — WSLg can't be screenshotted.
+
+  **Update — 2026-07-28, continued:** Developer reported that on Windows,
+  launching pain leaves the starting shell holding the process, with a
+  console window sitting there showing output — and that macOS doesn't do
+  this, Linux unknown.
+
+  **Root cause, confirmed by inspection not theory:** there was no
+  `windows_subsystem` attribute anywhere in the crate, so the binary was
+  built as a **console** subsystem app (Rust's default). That one fact
+  explains both halves: Windows allocates a console for a console-subsystem
+  process (so double-clicking gives a black window that lives as long as
+  the app), and `cmd`/PowerShell *wait* for console apps but not GUI ones.
+
+  Per-platform, for the record — the developer was right that macOS is
+  unaffected and right to be unsure about Linux:
+  - macOS: no subsystem concept at all; `.app` launched from Finder/Dock,
+    no shell involved. Never affected.
+  - Linux: **half** affected. No stray window (nothing equivalent exists),
+    and the `.desktop` launch path is clean — but a shell launch does block,
+    which is just ordinary Unix foreground behaviour that `&` solves. Looks
+    far less broken than Windows despite sharing that half.
+
+  **Fix:** `#![windows_subsystem = "windows"]` in `main.rs` **plus**
+  `crates/app/src/console.rs`'s `attach_to_parent()`. The attribute alone
+  would have been a silent regression: with no console at all, `--help`,
+  `--version` and `--verbose` print into nothing from a real terminal, and
+  `--help` is specifically the thing that tells people where their config
+  file is. So `AttachConsole(ATTACH_PARENT_PROCESS)` at the very top of
+  `main` re-acquires the launching terminal's console when there is one
+  (Explorer has none, so nothing appears). It reopens `CONOUT$` and
+  `SetStdHandle`s **only handles that are currently invalid**, so
+  `pain --help > out.txt` keeps redirecting to the file instead of being
+  hijacked onto the screen.
+
+  Applied to debug builds too, deliberately (not the common
+  `not(debug_assertions)` variant), so development exercises the same
+  startup path that ships.
+
+  Residual wart, inherent to the subsystem choice and not fixable in code:
+  since the shell no longer waits for a GUI app, CLI output lands *after*
+  the next prompt. Documented in README and CHANGELOG rather than hidden.
+
+  `windows-sys` declared as a `[target.'cfg(windows)'.dependencies]` entry;
+  it was already in the tree transitively via winit/wgpu, so this adds
+  nothing to the build.
+
+  **Verified without a Windows machine, by parsing the built PE header:**
+  cross-compiled `pain.exe` and read the Optional Header's Subsystem field
+  (offset PE+24+68) — reads **2 = IMAGE_SUBSYSTEM_WINDOWS_GUI**, where it
+  would have been 3 (CUI) before. That's direct evidence the attribute took
+  effect, rather than inferring it from a clean compile. Native + Windows
+  cross builds clean, clippy clean, 259 tests, Linux smoke launch
+  unaffected. The actual Windows behaviour — no console window, prompt
+  returns, `--help` still visible — needs the developer's machine.
+
+  **Update — 2026-07-28, continued:** Developer verified on real hardware:
+  **color emoji, ligatures, and the theme picker all work.** Two problems
+  with the activity indicator, both real and both fixed.
+
+  **1. "Activity dots are actually squares, which I never requested."**
+  Fair — the renderer only emits rectangles, so the first version pushed a
+  `SolidRect` and was literally a small square, while every document I
+  wrote called it a dot. Now drawn as `●` (`ACTIVITY_GLYPH`) through the
+  ordinary glyph path — the same technique `CLOSE_BUTTON_GLYPH`'s `×`
+  already used, so no shader or alpha-mask work. Added a test asserting
+  the glyph rasterizes, because a font lacking it would draw *nothing*
+  and look exactly like the feature being broken. Probed first across
+  ``/monospace/DejaVu Sans Mono/Liberation Mono — resolves in all of them.
+  `activity_slot_width` is now one cell wide instead of a fraction of the
+  bar height.
+
+  **2. "The sleep 3 thing works but the printf thing does nothing."** A
+  real bug, and the diagnosis is worth keeping. It was *not* a detection
+  failure — the bell was detected and then immediately discarded.
+  `printf '\a'` emits BEL the instant the command runs, which is while its
+  own pane is still focused (you just pressed Enter in it), and the rule
+  was "focus clears everything", so the flag was set and cleared within the
+  same poll and could never be drawn. `sleep 3; echo hi` appeared to work
+  only because the delay gave time to click away first — i.e. the one
+  case that *did* work was masking the bug rather than evidencing health.
+
+  Fix separates the two signals instead of special-casing:
+  - **Output** is about attention not yet given, so focus legitimately
+    clears it.
+  - **A bell** survives focus and is cleared by **input** to that pane.
+    Typing is what actually proves someone noticed; focus can happen
+    incidentally.
+  `Signals` gained `input`, set by `PaneSession::write_input` and consumed
+  at the next poll (input arrives on the keyboard path, not during a poll).
+
+  **Generalisable lesson, recorded in the feature doc:** a state machine
+  that clears on a *passive* condition (focus) will erase events arriving
+  simultaneously with that condition. Clearing on an *active* one (input)
+  has no such failure mode. My end-to-end test had encoded the wrong rule
+  and passed — it asserted "focus clears the bell", which was exactly the
+  bug. It failed correctly once the rule changed, which is the test doing
+  its job.
+
+  **Also this pass — the docs gap the developer reacted to.**
+  `.waypoint/features/` had been empty since the project began despite
+  OPORD §3d requiring an as-built doc per shipped feature. Now populated:
+  `README.md` (what belongs there vs. changelog/design/memory, and an
+  explicit note that Milestones 0-7 are *not* retroactively documented —
+  backfilling from memory would produce records less trustworthy than the
+  memory log and code comments already are), plus `themes.md`,
+  `pane-activity.md`, `glyph-rendering.md`, and `links-and-launch.md`.
+
+  Man page was badly stale and is now current: it still described `theme`
+  as "reserved; the theme format is not settled", had no `ligatures` entry,
+  documented the old `background_color` semantics, and had no pane-activity
+  section. Also updated the `Ctrl+click` entry for OSC 8 and the scheme
+  allowlist. Lints clean under `man --warnings`.
+
+  **Flagged to the developer, not acted on: CI runs no tests and no lint.**
+  `cargo test`/`cargo clippy` appear nowhere in either workflow —
+  `release.yml` only does `cargo build --release`, `verify-packages.yml`
+  builds and smoke-launches packages. So 263 tests only ever run locally,
+  and OPORD §3e's "treat warnings as errors in CI" is not implemented
+  anywhere. Also means the emoji tests (which skip without a color emoji
+  font) and the wgpu-device atlas tests have no automated protection at
+  all. Proposed a `ci.yml` with fmt/clippy/test plus
+  `fonts-noto-color-emoji` and `mesa-vulkan-drivers` so those actually
+  execute rather than skipping — awaiting the developer's go-ahead, since
+  adding a gate changes what blocks their pushes.
+
+  263 tests, clippy clean, build clean.

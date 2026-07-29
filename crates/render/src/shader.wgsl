@@ -5,6 +5,9 @@ struct Globals {
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_sampler: sampler;
+// Glyphs that carry their own colors (emoji) — see `atlas::COLOR_ATLAS_SIZE`
+// for why these are a separate texture rather than one widened atlas.
+@group(0) @binding(3) var color_atlas_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) corner: vec2<f32>,
@@ -16,12 +19,14 @@ struct InstanceInput {
     @location(3) uv_origin: vec2<f32>,
     @location(4) uv_size: vec2<f32>,
     @location(5) color: vec4<f32>,
+    @location(6) colored: f32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) colored: f32,
 };
 
 @vertex
@@ -34,11 +39,22 @@ fn vs_main(v: VertexInput, inst: InstanceInput) -> VertexOutput {
     out.clip_position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     out.uv = inst.uv_origin + v.corner * inst.uv_size;
     out.color = inst.color;
+    out.colored = inst.colored;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // A glyph the font draws in its own colors (an emoji). Its texels are
+    // already premultiplied on upload (see `glyph::GlyphPixels::Color`), so
+    // they composite directly — scaled only by the instance's alpha, which
+    // carries window transparency, never by its RGB, which would tint an
+    // emoji with the surrounding text color and destroy the very thing that
+    // makes it a color glyph.
+    if in.colored > 0.5 {
+        return textureSample(color_atlas_tex, atlas_sampler, in.uv) * in.color.a;
+    }
+
     let coverage = textureSample(atlas_tex, atlas_sampler, in.uv).r;
     let alpha = in.color.a * coverage;
     // Premultiplied output: RGB scaled by the *effective* alpha (instance

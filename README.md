@@ -100,6 +100,13 @@ configured shell.
 `all`. The bare flag enables `general` alone — the others fire constantly
 enough to drown it out, so each is an explicit opt-in.
 
+On Windows, `pain` is a windowed application, so starting it doesn't open a
+console and a shell you launch it from returns immediately. The options above
+still print to the terminal you ran them from, and redirecting to a file works
+normally — but because the shell no longer waits, their output appears just
+after your next prompt. That's how every windowed Windows program with a
+command line behaves.
+
 Full documentation is in the man page: `man pain`.
 
 ### Keyboard shortcuts
@@ -169,6 +176,30 @@ chord can't carry.
 `Shift+click` is the standard escape hatch for selecting text inside
 full-screen programs like vim or htop, which would otherwise eat the click.
 
+`Ctrl+click` follows a link that a program marked as one (the OSC 8 escape
+sequence, which tools like `cargo` and `gcc` emit), and otherwise falls back
+to matching URLs in the visible text. Only `http`, `https`, `ftp`, `ssh` and
+`mailto` are opened, whichever way the link was found — a terminal prints
+paths and arbitrary output constantly, and handing any of it to the operating
+system's default handler on a click is a wider door than this opens.
+
+### Pane activity
+
+Panes you aren't looking at show a dot in their title bar when something has
+happened, so a build or a log tail off to the side doesn't need watching:
+
+| Dot | Meaning | Cleared by |
+| --- | --- | --- |
+| Blue | The shell produced output since you last focused this pane | Focusing the pane |
+| Red | A program rang the terminal bell | Typing into the pane |
+
+The two clear differently on purpose. Output is only interesting for a pane
+you aren't watching, so looking at it is enough. A bell is a program asking
+for attention, and it usually rings the instant a command starts — while its
+own pane is still focused, because you just pressed Enter there. So a bell
+survives focus and clears when you next type into that pane, which is what
+actually shows you noticed.
+
 ## Configuration
 
 Settings live in a TOML file, read at startup and re-read when it changes:
@@ -192,15 +223,16 @@ lines are skipped one at a time rather than poisoning the whole table.
 ```toml
 [general]
 default_shell = ""            # empty = platform default ($SHELL, or your Windows default)
-scrollback_lines = 5000       # lines of history per pane
+scrollback_lines = 5000       # lines of history per pane (max 1000000)
 confirm_multiline_paste = true
 
 [appearance]
-theme = "default"             # reserved; the theme format isn't settled yet
+theme = "Graphite"            # any built-in theme; see Themes below
 font_family = "monospace"     # any installed monospaced family
-font_size = 13                # logical size, scaled by the display's DPI factor
+font_size = 13                # logical size, scaled by the display's DPI factor (6-48)
+ligatures = false             # shape != and => as single glyphs (needs a ligature font)
 transparency = 1.0            # 0.0 transparent .. 1.0 opaque
-background_color = "#0c0e11"
+background_color = ""         # empty = follow the theme; a hex value overrides it
 accent_color = "#7fa2d6"      # cursor, selection, interactive highlights
 
 [cursor]
@@ -218,9 +250,64 @@ arbitrary commands the instant it arrives; turning it off removes that.
 matches other applications on a scaled display rather than rendering smaller
 than everything else.
 
-Colors that carry meaning rather than style — the broadcast-target border, for
-instance — are fixed and unaffected by `accent_color`. An unparseable color
-falls back to its default rather than failing to load.
+Numeric settings are clamped to their valid range on load — `font_size` to
+6–48, `transparency` to 0.0–1.0, `scrollback_lines` to at most 1000000 — with
+a note on stderr saying what was changed. A value outside the range is used at
+the nearest end rather than reset to its default, since "as big as you'll give
+me" is a legible intent; a value that isn't a number at all falls back to the
+default.
+
+Colors that carry meaning rather than style — the broadcast-target border and
+the pane activity dot, for instance — are fixed and unaffected by
+`accent_color`. An unparseable color falls back to its default rather than
+failing to load.
+
+### Themes
+
+`theme` picks from over 600 built-in color schemes, compiled into the binary —
+there is nothing to download or install. The theme supplies the 16 ANSI colors
+programs draw with, plus the default foreground and background. Names match
+the familiar ones: `Dracula`, `Tokyo Night`, `Gruvbox Dark`, `Catppuccin
+Mocha`, `Solarized Light`, and so on. Matching is case-insensitive, and a name
+that isn't recognised falls back to the default rather than failing to load.
+
+Pick one from Settings, where the list is filterable, or set it by hand.
+
+`background_color` is an override: leave it empty and the background follows
+whichever theme you choose, which is usually what you want since a theme's
+background is part of its design. Set it to a hex value to pin the background
+regardless of theme.
+
+All but one theme come from the
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)
+collection (MIT). `Graphite` is this app's own default. See
+[`assets/themes/README.md`](assets/themes/README.md) for the details and how
+to regenerate the table.
+
+### Emoji
+
+Emoji render in color, using whichever color emoji font is installed — Noto
+Color Emoji on Linux, Apple Color Emoji on macOS, Segoe UI Emoji on Windows.
+Without one, they fall back to whatever monochrome glyph the system can find.
+
+Symbols that programs print as ordinary text — `✓`, `✗`, `★`, `➜` — stay
+monochrome and one cell wide on purpose. They have emoji forms in Unicode,
+but they're used constantly in build and test output, where turning them into
+colored pictures would be worse and would break their alignment.
+
+### Ligatures
+
+Off by default. When enabled, each row's text is shaped in runs so a font can
+render `!=` as `≠`, `=>` as `⇒`, and so on. This needs a font that actually
+provides them — Fira Code, JetBrains Mono, Cascadia Code, Iosevka. With any
+other font it has no visible effect.
+
+It's opt-in for two reasons. Glyph positions come from the font's own advances
+rather than from the cell grid, so a font whose ligature widths don't match
+its cell width will drift out of alignment; and shaping is real per-frame work
+that the default per-character path doesn't do. A ligature is never applied
+across a color change or across the cursor, so editing `!=` still shows you
+which character you're on.
 
 ### Keybindings
 

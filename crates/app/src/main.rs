@@ -1,12 +1,28 @@
 //! Application entrypoint: a winit window rendered via wgpu.
 
+// Build for the windows subsystem, not the console one. Without this, every
+// launch gets a console: double-clicking the executable opens a black window
+// that then sits there for as long as the terminal is running, and a shell
+// that starts it blocks until it exits. Neither happens on macOS or Linux,
+// which have no equivalent notion — this is a Windows-only default that has
+// to be turned off explicitly.
+//
+// Applied to debug builds too, deliberately, so development exercises the
+// same startup path that ships. `console::attach_to_parent` is what keeps
+// `--help`/`--version`/`--verbose` working from a real terminal; see that
+// module.
+#![windows_subsystem = "windows"]
+
+mod activity;
 mod color;
+mod console;
 mod foreground_process;
 mod graphics;
 mod mouse;
 mod pane_session;
 mod paste;
 mod platform;
+mod run;
 mod session_cwd;
 mod ui;
 mod url;
@@ -28,6 +44,12 @@ use layout::Orientation;
 use graphics::Graphics;
 
 fn main() -> anyhow::Result<()> {
+    // Before anything that might print. On Windows this app has no console
+    // of its own (see the `windows_subsystem` attribute above), so without
+    // this every `--help`, `--version`, `--verbose` line and every logged
+    // error would go nowhere when run from a terminal.
+    console::attach_to_parent();
+
     // `wgpu`/`wgpu-hal` report real backend failures (a DirectComposition
     // call failing, a surface misconfiguration, ...) through the `log`
     // crate, not by returning a message we can catch ourselves — without a
@@ -316,12 +338,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         let Some(graphics) = &mut self.graphics else {
             return;
         };
@@ -404,8 +421,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if !ui_consumed => {
-                let chord_result =
-                    winit_chord(&event, self.modifiers).and_then(|chord| graphics.dispatch_chord(chord));
+                let chord_result = winit_chord(&event, self.modifiers).and_then(|chord| graphics.dispatch_chord(chord));
                 match chord_result {
                     Some(true) => graphics.window().request_redraw(),
                     Some(false) => {
@@ -463,6 +479,27 @@ impl ApplicationHandler for App {
                     }
                 }
                 self.cursor_pos = pos;
+            }
+            // Deliberately *not* gated on `!ui_consumed`, unlike every other
+            // pointer arm here. A release is what ends a gesture some
+            // earlier press started, and the overlay reports a release over
+            // itself as consumed — so gating this the same way left drags
+            // and selections latched to the pointer indefinitely. See
+            // `Graphics::end_pointer_gestures`.
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                let modifiers = mouse_modifiers(self.modifiers);
+                if graphics.end_pointer_gestures(self.cursor_pos, modifiers) || !ui_consumed {
+                    graphics.window().request_redraw();
+                }
+            }
+            // Focus can be lost mid-drag (alt-tab, another window taking
+            // over) and no release is ever delivered for the press that's
+            // still outstanding — same latch, different cause.
+            WindowEvent::Focused(false) => {
+                let modifiers = mouse_modifiers(self.modifiers);
+                if graphics.end_pointer_gestures(self.cursor_pos, modifiers) {
+                    graphics.window().request_redraw();
+                }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if !ui_consumed => {
                 if verbose::is_verbose(verbose::Category::Mouse) {
@@ -542,12 +579,9 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        ElementState::Released => {
-                            graphics.mouse_release(self.cursor_pos, mouse::Button::Left, modifiers);
-                            graphics.end_drag();
-                            graphics.end_selection();
-                            graphics.window().request_redraw();
-                        }
+                        // Releases are handled by their own arm above, which
+                        // runs whether or not the overlay consumed them.
+                        ElementState::Released => {}
                     }
                 }
             }
@@ -620,11 +654,7 @@ impl ApplicationHandler for App {
 /// Translates winit's current modifier state into `mouse::Modifiers`, for
 /// encoding into a forwarded mouse report.
 fn mouse_modifiers(modifiers: ModifiersState) -> mouse::Modifiers {
-    mouse::Modifiers {
-        shift: modifiers.shift_key(),
-        alt: modifiers.alt_key(),
-        ctrl: modifiers.control_key(),
-    }
+    mouse::Modifiers { shift: modifiers.shift_key(), alt: modifiers.alt_key(), ctrl: modifiers.control_key() }
 }
 
 /// Whether `event` is a Tab keypress — see the Tab-key override in

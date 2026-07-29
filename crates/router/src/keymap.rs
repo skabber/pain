@@ -30,13 +30,7 @@ pub struct Chord {
 
 impl Chord {
     pub fn new(key: Key) -> Self {
-        Self {
-            key,
-            ctrl: false,
-            shift: false,
-            alt: false,
-            logo: false,
-        }
+        Self { key, ctrl: false, shift: false, alt: false, logo: false }
     }
 
     pub fn ctrl(mut self) -> Self {
@@ -120,9 +114,7 @@ impl Action {
 /// it are macOS's, and that's the name on the key there.
 impl std::fmt::Display for Chord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (active, name) in
-            [(self.ctrl, "ctrl"), (self.shift, "shift"), (self.alt, "alt"), (self.logo, "cmd")]
-        {
+        for (active, name) in [(self.ctrl, "ctrl"), (self.shift, "shift"), (self.alt, "alt"), (self.logo, "cmd")] {
             if active {
                 write!(f, "{name}+")?;
             }
@@ -176,14 +168,8 @@ impl Keymap {
     pub fn defaults_for_platform(is_macos: bool) -> Self {
         let mut keymap = Self::empty();
 
-        keymap.bind(
-            Chord::new(Key::Char('o')).ctrl().shift(),
-            Action::Split(Orientation::Horizontal),
-        );
-        keymap.bind(
-            Chord::new(Key::Char('e')).ctrl().shift(),
-            Action::Split(Orientation::Vertical),
-        );
+        keymap.bind(Chord::new(Key::Char('o')).ctrl().shift(), Action::Split(Orientation::Horizontal));
+        keymap.bind(Chord::new(Key::Char('e')).ctrl().shift(), Action::Split(Orientation::Vertical));
         keymap.bind(Chord::new(Key::Char('w')).ctrl().shift(), Action::ClosePane);
         keymap.bind(Chord::new(Key::Char('q')).ctrl().shift(), Action::Quit);
 
@@ -485,11 +471,7 @@ mod tests {
             for (chord, action) in Keymap::defaults_for_platform(is_macos).bindings() {
                 let chord = chord.to_string();
                 assert!(readme.contains(&chord), "README doesn't mention the {chord:?} shortcut");
-                assert!(
-                    readme.contains(action.name()),
-                    "README doesn't mention the {:?} action",
-                    action.name()
-                );
+                assert!(readme.contains(action.name()), "README doesn't mention the {:?} action", action.name());
             }
         }
 
@@ -512,10 +494,7 @@ mod tests {
         ]));
 
         assert_eq!(keymap.lookup(Chord::new(Key::Char('v')).ctrl()), None);
-        assert_eq!(
-            keymap.lookup(Chord::new(Key::Char('c')).ctrl().shift()),
-            Some(Action::CopyOrInterrupt)
-        );
+        assert_eq!(keymap.lookup(Chord::new(Key::Char('c')).ctrl().shift()), Some(Action::CopyOrInterrupt));
     }
 
     #[test]
@@ -544,21 +523,15 @@ mod tests {
     #[test]
     fn override_rebinds_a_chord() {
         let mut keymap = Keymap::terminator_defaults();
-        let overrides = std::collections::BTreeMap::from([
-            ("ctrl+shift+e".to_string(), "close_pane".to_string()),
-        ]);
+        let overrides = std::collections::BTreeMap::from([("ctrl+shift+e".to_string(), "close_pane".to_string())]);
         keymap.apply_overrides(&overrides);
-        assert_eq!(
-            keymap.lookup(Chord::new(Key::Char('e')).ctrl().shift()),
-            Some(Action::ClosePane)
-        );
+        assert_eq!(keymap.lookup(Chord::new(Key::Char('e')).ctrl().shift()), Some(Action::ClosePane));
     }
 
     #[test]
     fn override_of_none_unbinds_without_a_replacement() {
         let mut keymap = Keymap::terminator_defaults();
-        let overrides =
-            std::collections::BTreeMap::from([("ctrl+shift+w".to_string(), "none".to_string())]);
+        let overrides = std::collections::BTreeMap::from([("ctrl+shift+w".to_string(), "none".to_string())]);
         keymap.apply_overrides(&overrides);
         assert_eq!(keymap.lookup(Chord::new(Key::Char('w')).ctrl().shift()), None);
     }
@@ -566,9 +539,7 @@ mod tests {
     #[test]
     fn override_can_bind_a_previously_unbound_action() {
         let mut keymap = Keymap::terminator_defaults();
-        let overrides = std::collections::BTreeMap::from([
-            ("ctrl+shift+g".to_string(), "broadcast_all".to_string()),
-        ]);
+        let overrides = std::collections::BTreeMap::from([("ctrl+shift+g".to_string(), "broadcast_all".to_string())]);
         keymap.apply_overrides(&overrides);
         assert_eq!(
             keymap.lookup(Chord::new(Key::Char('g')).ctrl().shift()),
@@ -585,19 +556,14 @@ mod tests {
         ]);
         keymap.apply_overrides(&overrides);
         // The malformed entry didn't stop the well-formed one after it.
-        assert_eq!(
-            keymap.lookup(Chord::new(Key::Char('q')).ctrl().shift()),
-            Some(Action::ClosePane)
-        );
+        assert_eq!(keymap.lookup(Chord::new(Key::Char('q')).ctrl().shift()), Some(Action::ClosePane));
     }
 
     #[test]
     fn override_with_unknown_action_is_skipped_not_fatal() {
         let mut keymap = Keymap::terminator_defaults();
-        let overrides = std::collections::BTreeMap::from([(
-            "ctrl+shift+e".to_string(),
-            "not_a_real_action".to_string(),
-        )]);
+        let overrides =
+            std::collections::BTreeMap::from([("ctrl+shift+e".to_string(), "not_a_real_action".to_string())]);
         keymap.apply_overrides(&overrides);
         // Unrecognized action left the original binding in place.
         assert_eq!(
@@ -609,10 +575,7 @@ mod tests {
     #[test]
     fn chord_modifiers_parse_in_any_order_case_insensitively() {
         let mut keymap = Keymap::empty();
-        let overrides = std::collections::BTreeMap::from([(
-            "Shift+CTRL+e".to_string(),
-            "quit".to_string(),
-        )]);
+        let overrides = std::collections::BTreeMap::from([("Shift+CTRL+e".to_string(), "quit".to_string())]);
         keymap.apply_overrides(&overrides);
         assert_eq!(keymap.lookup(Chord::new(Key::Char('e')).ctrl().shift()), Some(Action::Quit));
     }

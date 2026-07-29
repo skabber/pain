@@ -120,7 +120,7 @@ Build, test, and document according to the plan. All code, configuration, and do
 
 | Concern | Standard |
 |---|---|
-| Formatting | `rustfmt` defaults, no custom config, run before every commit |
+| Formatting | `rustfmt` per the repo's `rustfmt.toml`, run before every commit |
 | Linting | `clippy` clean (default lint set); treat warnings as errors in CI |
 | Errors | `Result` + `?` propagation; no `.unwrap()`/`.expect()` outside tests and startup-time invariants |
 | Workspace | Cargo workspace, one crate per major component (e.g. layout/pane tree, input router, renderer, config) |

@@ -1,0 +1,6 @@
+# The codebase was written at roughly this width before rustfmt was ever run
+# against it, and `Max` heuristics match its habit of keeping a call or struct
+# literal on one line whenever it fits. Both were chosen by measuring the churn
+# a sweep of candidate settings produced, not by preference.
+max_width = 120
+use_small_heuristics = "Max"

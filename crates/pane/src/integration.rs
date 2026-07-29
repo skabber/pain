@@ -498,10 +498,7 @@ mod tests {
             Some("/mnt/c/Users/Will/file.txt")
         );
         // Lowercased regardless of the drive letter's own case.
-        assert_eq!(
-            windows_path_to_wsl_mount(Path::new("D:\\stuff")).as_deref(),
-            Some("/mnt/d/stuff")
-        );
+        assert_eq!(windows_path_to_wsl_mount(Path::new("D:\\stuff")).as_deref(), Some("/mnt/d/stuff"));
     }
 
     #[test]
@@ -513,8 +510,12 @@ mod tests {
 
     #[test]
     fn wsl_entrypoint_contents_embeds_the_given_path_and_execs_bash_or_the_real_shell() {
-        let contents = wsl_entrypoint_contents("/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash");
-        assert!(contents.contains("/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash"));
+        let contents = wsl_entrypoint_contents(
+            "/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash",
+        );
+        assert!(
+            contents.contains("/mnt/c/Users/Will/AppData/Local/Temp/pain-shell-integration/shell-integration.bash")
+        );
         assert!(contents.contains("exec bash --rcfile"));
         // The non-bash fallback execs whatever the distro's real shell
         // is — never forces one the user didn't already have configured.

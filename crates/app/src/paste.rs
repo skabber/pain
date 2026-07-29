@@ -57,33 +57,59 @@ fn strip_end_markers(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Characters that submit a line to the program behind the PTY.
+///
+/// **Both**, not just `\n`. Carriage return is what the Enter key actually
+/// sends (see `key_bytes` in `main.rs`), and the PTY's line discipline maps
+/// it to a newline — so `\r` executes a command exactly as `\n` does. This
+/// check tested only `\n` at first, which meant text using bare carriage
+/// returns ran however many commands it liked without ever prompting:
+/// precisely the "attacker-influenced text" case this module exists to
+/// cover, and trivially reachable by anyone who knew to use `\r`.
+const SUBMIT: [char; 2] = ['\n', '\r'];
+
 /// Whether a paste should be confirmed with the user before it's sent.
 ///
 /// `bracketed` means the receiving program has bracketed paste enabled,
 /// which already prevents the newlines from executing — asking as well
 /// would be pure friction, so it never prompts in that case.
 ///
-/// Otherwise the rule is "would this run more than one command": any
-/// newline that isn't the single trailing one. A lone trailing newline is
-/// the overwhelmingly common "copy a command, paste it, run it" case, and
-/// prompting on it would train people to click through the dialog without
-/// reading — which is worse than not having it.
+/// Otherwise the rule is "would this run more than one command": any line
+/// break that isn't part of the single trailing one. A lone trailing
+/// newline is the overwhelmingly common "copy a command, paste it, run it"
+/// case, and prompting on it would train people to click through the dialog
+/// without reading — which is worse than not having it. A trailing `\r\n`
+/// counts as one such break, not two.
 pub fn needs_confirmation(text: &str, bracketed: bool) -> bool {
     if bracketed {
         return false;
     }
-    text.trim_end_matches('\n').contains('\n')
+    text.trim_end_matches(SUBMIT).contains(SUBMIT)
+}
+
+/// Splits `text` into non-empty lines on either line-break convention, the
+/// same set [`needs_confirmation`] counts. `str::lines` only knows `\n`
+/// (treating `\r` as ordinary text), which would report a
+/// carriage-return-separated paste as a single line in the confirmation
+/// dialog — understating exactly what the user is being asked to approve.
+///
+/// Empty pieces are dropped, which handles `\r\n` (one break, not two)
+/// and also means a blank line isn't counted. That suits what the count is
+/// for: the dialog is telling the user roughly how many commands are about
+/// to run, and a blank line runs nothing.
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split(SUBMIT).filter(|line| !line.is_empty())
 }
 
 /// A short, single-line summary of a paste for the confirmation prompt —
 /// enough to recognize what's about to be sent without letting a large
 /// paste blow out the dialog.
 pub fn summarize(text: &str) -> String {
-    let lines = text.trim_end_matches('\n').lines().count();
-    let first = text.lines().next().unwrap_or("").trim();
+    let count = lines(text).count();
+    let first = lines(text).next().unwrap_or("").trim();
     let truncated: String = first.chars().take(60).collect();
     let ellipsis = if first.chars().count() > 60 { "…" } else { "" };
-    format!("{lines} lines, starting: {truncated}{ellipsis}")
+    format!("{count} lines, starting: {truncated}{ellipsis}")
 }
 
 #[cfg(test)]
@@ -127,6 +153,38 @@ mod tests {
     fn multi_line_unbracketed_paste_prompts() {
         assert!(needs_confirmation("echo one\necho two", false));
         assert!(needs_confirmation("echo one\necho two\n", false));
+    }
+
+    /// Carriage return is what Enter actually sends, and the PTY maps it to
+    /// a newline — so `\r` runs a command exactly as `\n` does. This check
+    /// tested only `\n`, which let a caller run as many commands as they
+    /// liked with no prompt just by separating them with `\r`. Verified
+    /// against a real `/bin/sh` pty at the time: both commands ran.
+    #[test]
+    fn carriage_returns_prompt_the_same_as_newlines() {
+        assert!(needs_confirmation("echo one\recho two", false));
+        assert!(needs_confirmation("echo one\recho two\r", false));
+        assert!(needs_confirmation("echo one\r\necho two\r\n", false));
+        // Mixed conventions in one payload, which is what a naive
+        // "normalize then check" pass tends to miss.
+        assert!(needs_confirmation("echo one\recho two\necho three", false));
+    }
+
+    #[test]
+    fn a_single_trailing_carriage_return_does_not_prompt() {
+        // The `\n` case's exact counterpart: one command, submitted once.
+        assert!(!needs_confirmation("echo hi\r", false));
+        assert!(!needs_confirmation("echo hi\r\n", false));
+    }
+
+    #[test]
+    fn a_carriage_return_separated_paste_is_not_summarized_as_one_line() {
+        // `str::lines` treats `\r` as ordinary text, so this used to read
+        // "1 lines" — understating exactly what the user is approving.
+        assert_eq!(summarize("echo one\recho two\r"), "2 lines, starting: echo one");
+        // A `\r\n` pair is one break, not two, so it must not inflate the
+        // count either.
+        assert_eq!(summarize("echo one\r\necho two\r\n"), "2 lines, starting: echo one");
     }
 
     #[test]

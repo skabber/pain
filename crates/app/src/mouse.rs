@@ -44,9 +44,7 @@ pub struct Modifiers {
 pub fn wants_report(mode: TermMode, kind: Kind, button_held: bool) -> bool {
     match kind {
         Kind::Press | Kind::Release => mode.intersects(TermMode::MOUSE_MODE),
-        Kind::Motion => {
-            mode.contains(TermMode::MOUSE_MOTION) || (button_held && mode.contains(TermMode::MOUSE_DRAG))
-        }
+        Kind::Motion => mode.contains(TermMode::MOUSE_MOTION) || (button_held && mode.contains(TermMode::MOUSE_DRAG)),
     }
 }
 

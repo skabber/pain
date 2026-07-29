@@ -5,12 +5,36 @@ use std::io::Read;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+/// What one [`PaneSession::pump`] found.
+///
+/// `changed` drives repainting; the other two feed the pane's title-bar
+/// activity dot (`crate::activity`). They're deliberately separate: a pane
+/// whose shell merely exited has `changed` set but did nothing worth
+/// flagging for attention.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PumpOutcome {
+    /// Whether anything changed such that a redraw is warranted.
+    pub changed: bool,
+    /// Whether new output actually arrived from the shell.
+    pub output: bool,
+    /// Whether the program rang the terminal bell.
+    pub bell: bool,
+}
+
 /// A running shell plus the screen its output is parsed into.
 pub struct PaneSession {
     pty: pane::Pty,
     screen: pane::Screen,
     rx: Receiver<Vec<u8>>,
     exit_logged: bool,
+    /// What this pane has done since it was last focused — see
+    /// `crate::activity`.
+    activity: crate::activity::Activity,
+    /// Set by [`PaneSession::write_input`], cleared by the next
+    /// [`PaneSession::take_received_input`]. Input is what acknowledges a
+    /// bell, and it arrives on the event loop's keyboard path rather than
+    /// during a poll, so it has to be recorded until the poll gets to it.
+    received_input: bool,
     /// The shell this pane was spawned with — `None` means "whatever the
     /// configured default was at the time" (so a restored pane keeps
     /// following the *current* default even if that's changed since),
@@ -22,11 +46,13 @@ pub struct PaneSession {
 
 impl PaneSession {
     /// Spawns `shell` (or the platform default when `None`) behind a PTY of
-    /// `size`, starting in `cwd` if given (session restore), and starts a
-    /// background thread reading its output.
+    /// `size`, retaining `scrollback` lines of history, starting in `cwd` if
+    /// given (session restore), and starts a background thread reading its
+    /// output.
     pub fn spawn(
         shell: Option<&str>,
         size: pane::Size,
+        scrollback: usize,
         cwd: Option<&std::path::Path>,
         waker: crate::waker::Waker,
     ) -> anyhow::Result<Self> {
@@ -52,10 +78,7 @@ impl PaneSession {
                     }
                     Ok(n) => {
                         if crate::verbose::is_verbose(crate::verbose::Category::Pty) {
-                            eprintln!(
-                                "pane: read {n} bytes from PTY: {:?}",
-                                String::from_utf8_lossy(&buf[..n])
-                            );
+                            eprintln!("pane: read {n} bytes from PTY: {:?}", String::from_utf8_lossy(&buf[..n]));
                         }
                         if tx.send(buf[..n].to_vec()).is_err() {
                             break;
@@ -70,9 +93,11 @@ impl PaneSession {
 
         Ok(Self {
             pty,
-            screen: pane::Screen::new(size),
+            screen: pane::Screen::new(size, scrollback),
             rx,
             exit_logged: false,
+            activity: crate::activity::Activity::default(),
+            received_input: false,
             shell: shell.map(str::to_string),
         })
     }
@@ -84,14 +109,16 @@ impl PaneSession {
     }
 
     /// Applies any PTY output received since the last call.
-    /// Returns whether anything actually changed — i.e. whether a redraw
-    /// is warranted. The render loop only wakes the GPU when this (or
-    /// some other real change) says so; an idle pane must cost nothing.
-    pub fn pump(&mut self) -> bool {
-        let mut changed = false;
+    ///
+    /// The `changed` field of the result drives repainting: the render loop
+    /// only wakes the GPU when this (or some other real change) says so, so
+    /// an idle pane must cost nothing.
+    pub fn pump(&mut self) -> PumpOutcome {
+        let mut outcome = PumpOutcome::default();
         while let Ok(chunk) = self.rx.try_recv() {
             self.screen.advance(&chunk);
-            changed = true;
+            outcome.changed = true;
+            outcome.output = true;
         }
 
         let writes = self.screen.take_pty_writes();
@@ -101,6 +128,14 @@ impl PaneSession {
             eprintln!("pane: failed to write terminal reply to PTY: {err:#}");
         }
 
+        // Read after the parse above, since that's what raises it. A bell
+        // repaints too — the title-bar dot is the only thing that shows it,
+        // so nothing else would bring it on screen.
+        outcome.bell = self.screen.take_bell();
+        if outcome.bell {
+            outcome.changed = true;
+        }
+
         if !self.exit_logged
             && let Some(status) = self.pty.exit_status()
         {
@@ -108,10 +143,21 @@ impl PaneSession {
                 eprintln!("pane: shell exited: {status}");
             }
             self.exit_logged = true;
-            changed = true;
+            outcome.changed = true;
         }
 
-        changed
+        outcome
+    }
+
+    /// What this pane has done since it was last focused.
+    pub fn activity(&self) -> crate::activity::Activity {
+        self.activity
+    }
+
+    /// Advances the pane's activity state for one poll — see
+    /// `crate::activity::next` for the rule.
+    pub fn update_activity(&mut self, focused: bool, signals: crate::activity::Signals) {
+        self.activity = crate::activity::next(self.activity, focused, signals);
     }
 
     pub fn screen(&self) -> &pane::Screen {
@@ -141,13 +187,26 @@ impl PaneSession {
             eprintln!("pane: writing {data:?} to PTY");
         }
         self.screen.scroll_to_bottom();
+        self.received_input = true;
         self.pty.write(data)
+    }
+
+    /// Whether the user sent input to this pane since the last call,
+    /// clearing the flag — see the field's own doc comment.
+    pub fn take_received_input(&mut self) -> bool {
+        std::mem::replace(&mut self.received_input, false)
     }
 
     /// Scrolls the viewport `lines` rows back into history (positive) or
     /// forward toward live output (negative) — see `pane::Screen::scroll`.
     pub fn scroll(&mut self, lines: i32) {
         self.screen.scroll(lines);
+    }
+
+    /// Changes how many lines of history this pane retains, for a live
+    /// config edit — see `pane::Screen::set_scrollback`.
+    pub fn set_scrollback(&mut self, scrollback: usize) {
+        self.screen.set_scrollback(scrollback);
     }
 
     /// Starts a fresh in-grid text selection at 0-indexed (row, col).
@@ -221,7 +280,8 @@ mod tests {
         let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
         let mut session =
-            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop()).expect("spawn a real pane");
+            PaneSession::spawn(Some("bash"), pane::Size { rows: 24, cols: 80 }, 100, None, crate::waker::Waker::noop())
+                .expect("spawn a real pane");
         session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
 
         let mut processes = crate::foreground_process::ForegroundProcesses::new();
@@ -245,11 +305,7 @@ mod tests {
         #[cfg(unix)]
         if session.screen().cwd().is_none() {
             let os_level = session.shell_pid().and_then(|pid| processes.cwd_of(pid));
-            assert_eq!(
-                os_level.as_deref(),
-                Some(expected.as_path()),
-                "the OS-level lookup alone should have found it"
-            );
+            assert_eq!(os_level.as_deref(), Some(expected.as_path()), "the OS-level lookup alone should have found it");
         }
     }
 
@@ -263,9 +319,14 @@ mod tests {
         let dir = std::env::temp_dir();
         let expected = dir.canonicalize().unwrap_or_else(|_| dir.clone());
 
-        let mut session =
-            PaneSession::spawn(Some("/bin/sh"), pane::Size { rows: 24, cols: 80 }, None, crate::waker::Waker::noop())
-                .expect("spawn a real pane");
+        let mut session = PaneSession::spawn(
+            Some("/bin/sh"),
+            pane::Size { rows: 24, cols: 80 },
+            100,
+            None,
+            crate::waker::Waker::noop(),
+        )
+        .expect("spawn a real pane");
         session.write_input(format!("cd {}\n", expected.display()).as_bytes()).expect("write cd command");
 
         let mut processes = crate::foreground_process::ForegroundProcesses::new();
@@ -278,5 +339,55 @@ mod tests {
         }
 
         assert_eq!(cwd, expected, "an uninjected shell's cwd should be readable from the process table");
+    }
+
+    /// The whole chain, through a real shell rather than a stand-in: a
+    /// program prints `BEL`, the VT parser raises the event, `pump` reports
+    /// it, and an unfocused pane ends up flagged for attention. Each link
+    /// is unit-tested on its own; this is what proves they're connected.
+    #[test]
+    fn a_real_shell_ringing_the_bell_flags_an_unfocused_pane() {
+        let mut session =
+            PaneSession::spawn(Some("sh"), pane::Size { rows: 24, cols: 80 }, 100, None, crate::waker::Waker::noop())
+                .expect("spawn a real pane");
+
+        session.write_input(b"printf '\\a'\n").expect("write the bell command");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut rang = false;
+        while !rang && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let pumped = session.pump();
+            rang |= pumped.bell;
+            // Unfocused, which is the only state the dot exists for.
+            session.update_activity(
+                false,
+                crate::activity::Signals { output: pumped.output, bell: pumped.bell, input: false },
+            );
+        }
+
+        assert!(rang, "a real shell printing BEL should surface as a bell from pump()");
+        assert_eq!(
+            session.activity(),
+            crate::activity::Activity::Bell,
+            "the bell should leave the pane flagged for attention"
+        );
+
+        // Merely focusing the pane must NOT clear it. `printf '\a'` rings
+        // while its own pane is still focused, so clearing on focus erased
+        // the flag before it could ever be drawn — the reported bug.
+        session.update_activity(true, crate::activity::Signals::default());
+        assert_eq!(
+            session.activity(),
+            crate::activity::Activity::Bell,
+            "focus alone must not erase a bell that was never seen"
+        );
+
+        // Typing into the pane is what acknowledges it, through the real
+        // input path rather than a hand-set flag.
+        session.write_input(b"\n").expect("write to the pane");
+        let signals = crate::activity::Signals { input: session.take_received_input(), ..Default::default() };
+        session.update_activity(true, signals);
+        assert_eq!(session.activity(), crate::activity::Activity::Idle);
     }
 }

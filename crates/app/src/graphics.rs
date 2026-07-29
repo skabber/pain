@@ -20,10 +20,14 @@ const DIVIDER_HIT_MARGIN: f32 = 4.0;
 /// "Graphite" palette (see the design-pass memory entry): a cool near-
 /// black ground with desaturated slate-gray chrome. `#262b31`.
 const DIVIDER_COLOR: [f32; 4] = [0.149, 0.169, 0.192, 1.0];
-/// `#dfe2e6` — Graphite's ink color, used for cell text and title-bar text
-/// alike (an ungrouped pane's title bar is dark enough that the same
-/// light ink reads fine there too; a grouped pane's random background
-/// needs `contrasting_text_color` instead, since it might not be).
+/// `#dfe2e6` — Graphite's ink color, for title-bar text (an ungrouped
+/// pane's title bar is dark enough that this light ink reads fine there; a
+/// grouped pane's palette-picked background needs `contrasting_text_color`
+/// instead, since it might not be).
+///
+/// Chrome only. Grid text takes its default color from the active theme's
+/// foreground — the title bar deliberately keeps a fixed look, so choosing
+/// a light theme doesn't leave the chrome looking like a different app.
 const TEXT_COLOR: [f32; 4] = [0.875, 0.886, 0.902, 1.0];
 
 /// A URL under the pointer: where to draw its underline, and what to open
@@ -43,13 +47,6 @@ struct UrlHover {
 pub struct PollOutcome {
     pub needs_redraw: bool,
     pub panes_remain: bool,
-}
-
-/// Drops `TEXT_COLOR`'s alpha channel, for use as a per-cell default color
-/// (`color::resolve`'s API works in bare RGB — alpha is always opaque for
-/// grid text, so there's nothing meaningful for a fourth channel to say).
-fn rgb3(c: [f32; 4]) -> [f32; 3] {
-    [c[0], c[1], c[2]]
 }
 
 /// Scales `settings.appearance.font_size` (a user-facing "points" value —
@@ -98,6 +95,24 @@ const TITLE_BAR_TEXT_LIGHT: [f32; 4] = TEXT_COLOR;
 /// bright grouped pane's title bar — the same hue family as the rest of
 /// the chrome rather than a plain neutral black.
 const TITLE_BAR_TEXT_DARK: [f32; 4] = [0.047, 0.055, 0.067, 1.0];
+/// Activity dot colors, both fixed regardless of the user's accent color
+/// for the same reason `BROADCAST_BORDER_COLOR` is: these are semantic
+/// signals about pane state, not decorative highlights.
+///
+/// Deliberately neither of them orange — that hue already means "receiving
+/// broadcast input" elsewhere in the same chrome.
+const ACTIVITY_OUTPUT_COLOR: [f32; 4] = [0.29, 0.62, 0.85, 1.0];
+const ACTIVITY_BELL_COLOR: [f32; 4] = [0.90, 0.30, 0.30, 1.0];
+/// The activity indicator, drawn as an ordinary glyph through the same
+/// monospace grid the title text uses — the identical approach
+/// `CLOSE_BUTTON_GLYPH` already takes.
+///
+/// A real round dot, not a square. The renderer only draws rectangles, so
+/// the first version emitted a `SolidRect` and was, accurately, a small
+/// square; a circle would otherwise need either a shader change or an
+/// alpha mask, and the font already has this glyph.
+pub(crate) const ACTIVITY_GLYPH: char = '●';
+
 /// A grouped pane's title bar background is picked from this set, keyed by
 /// a hash of the group's name (stable across reloads/restarts — the same
 /// group name always gets the same color, rather than actually re-rolling
@@ -642,6 +657,17 @@ impl Graphics {
         }
     }
 
+    /// Width reserved at the title bar's left edge for the activity dot.
+    ///
+    /// Reserved unconditionally, whether or not a dot is currently drawn:
+    /// the group name starts after it, and letting the slot collapse when
+    /// idle would make every label in the bar jump sideways the moment a
+    /// background pane produced output — motion that reads as a glitch, and
+    /// exactly where the eye is being drawn.
+    fn activity_slot_width(cell: (f32, f32)) -> f32 {
+        cell.0 + TITLE_BAR_PADDING
+    }
+
     /// Resizes every currently-visible pane's PTY and grid to match the
     /// layout's current geometry. Called after anything that changes pane
     /// rects: window resize, split, close, zoom toggle, divider drag.
@@ -1105,7 +1131,25 @@ impl Graphics {
         let pane = self.pane_at(pos)?;
         let (col, row) = self.cell_at(pane, pos)?;
         let session = self.panes.get(&pane)?;
-        let cells = session.screen().visible_cells();
+        let screen = session.screen();
+
+        // An OSC 8 hyperlink wins over pattern matching: the program stated
+        // the target outright, so there's nothing to infer, and the visible
+        // text needn't look like a URL at all (`ls --hyperlink` labels a
+        // link with the plain filename). Falling back the other way would
+        // mean ignoring an explicit answer in favour of a guess.
+        if let Some(link) = screen.hyperlink_at(row, col) {
+            // Scheme-checked all the same — see `url::is_allowed_scheme`. A
+            // disallowed target isn't a reason to fall through to pattern
+            // matching either: the program already told us what this text
+            // means, and guessing something else from it would be worse.
+            if crate::url::is_allowed_scheme(&link.uri) {
+                return Some(UrlHover { pane, row, start_col: link.start, end_col: link.end, url: link.uri });
+            }
+            return None;
+        }
+
+        let cells = screen.visible_cells();
         let line: String = cells.get(row)?.iter().map(|c| c.c).collect();
         let m = crate::url::match_at_column(&line, col)?;
         Some(UrlHover { pane, row, start_col: m.start, end_col: m.end, url: m.url })
@@ -1438,10 +1482,29 @@ impl Graphics {
         }
 
         let mut exited = Vec::new();
+        let focused = self.focused;
         for (pane, session) in self.panes.iter_mut() {
-            if session.pump() {
+            let pumped = session.pump();
+            if pumped.changed {
                 outcome.needs_redraw = true;
             }
+
+            // Activity is diffed rather than assumed dirty, the same way
+            // titles are below: this runs every wake, and the overwhelmingly
+            // common case is "nothing changed". Focusing a pane clears its
+            // dot, which is a repaint nothing else would ask for — the click
+            // that moved focus was handled a frame earlier.
+            let before = session.activity();
+            let signals = crate::activity::Signals {
+                output: pumped.output,
+                bell: pumped.bell,
+                input: session.take_received_input(),
+            };
+            session.update_activity(*pane == focused, signals);
+            if session.activity() != before {
+                outcome.needs_redraw = true;
+            }
+
             if session.has_exited() {
                 exited.push(*pane);
             }
@@ -1538,6 +1601,12 @@ impl Graphics {
         // "colored" background rect would visibly seam against the real
         // one drawn behind it.
         let background_rgb = self.settings.appearance.background_rgb();
+        // The theme supplies both the 16 ANSI slots and what a cell left at
+        // its default foreground resolves to. Read fresh each frame, like
+        // every other appearance setting, so switching theme restyles
+        // already-running panes with nothing to invalidate.
+        let palette = self.settings.appearance.palette();
+        let foreground_rgb = self.settings.appearance.foreground_rgb();
         // The cursor and selection highlight both use the user's chosen
         // accent color (Settings' "Accent color") rather than a fixed
         // constant — unlike the broadcast-target border, which is a fixed
@@ -1574,6 +1643,10 @@ impl Graphics {
         let router = &self.router;
         let hovered_url = self.hovered_url.as_ref();
         let foreground_processes = &self.foreground_processes;
+        let ligatures = self.settings.appearance.ligatures;
+        // Filled only in ligature mode; the per-character path leaves it
+        // empty and costs nothing.
+        let mut pane_runs: Vec<render::GlyphRun> = Vec::new();
         let glyphs: Vec<render::GlyphCell> = geometry
             .panes
             .iter()
@@ -1628,10 +1701,28 @@ impl Graphics {
                     c,
                     color: title_bar_text,
                 }));
+                // Activity dot, in its reserved slot ahead of the group
+                // name. Nothing is drawn when the pane is idle — the slot
+                // stays reserved regardless (see `activity_slot_width`).
+                let activity_color = match session.activity() {
+                    crate::activity::Activity::Idle => None,
+                    crate::activity::Activity::Output => Some(ACTIVITY_OUTPUT_COLOR),
+                    crate::activity::Activity::Bell => Some(ACTIVITY_BELL_COLOR),
+                };
+                if let Some(color) = activity_color {
+                    pane_glyphs.push(render::GlyphCell {
+                        x: full.x + TITLE_BAR_PADDING,
+                        y: title_y,
+                        c: ACTIVITY_GLYPH,
+                        color,
+                    });
+                }
+
                 if let Some(g) = &group {
                     let name: String = g.0.chars().take(max_chars).collect();
+                    let name_x = full.x + TITLE_BAR_PADDING + Self::activity_slot_width(cell);
                     pane_glyphs.extend(name.chars().enumerate().map(|(i, c)| render::GlyphCell {
-                        x: full.x + TITLE_BAR_PADDING + i as f32 * cell.0,
+                        x: name_x + i as f32 * cell.0,
                         y: title_y,
                         c,
                         color: title_bar_text,
@@ -1679,7 +1770,15 @@ impl Graphics {
                     });
                 }
 
+                // Only meaningful for the pane that has it, and only while
+                // that pane is showing live output — the cursor tracks the
+                // live screen, so it corresponds to nothing visible in
+                // scrolled-back history.
+                let cursor = (pane_rect.pane == focused && !screen.is_scrolled_back()).then(|| screen.cursor());
+
                 for (row, row_cells) in cells.into_iter().enumerate() {
+                    let mut run_cells: Vec<crate::run::RunCell> = Vec::new();
+
                     for (col, rc) in row_cells.into_iter().enumerate() {
                         // SGR reverse-video (`Flags::INVERSE`) swaps which
                         // side of the cell each color paints — handled by
@@ -1692,7 +1791,7 @@ impl Graphics {
                         let y = origin.y + row as f32 * cell.1;
 
                         if !color::is_default_background(bg_src) {
-                            let [r, g, b] = color::resolve(bg_src, rc.flags, false, background_rgb);
+                            let [r, g, b] = color::resolve(bg_src, rc.flags, false, background_rgb, &palette);
                             rects.push(render::SolidRect {
                                 x,
                                 y,
@@ -1702,9 +1801,26 @@ impl Graphics {
                             });
                         }
 
-                        if rc.c != ' ' {
-                            let [r, g, b] = color::resolve(fg_src, rc.flags, true, rgb3(TEXT_COLOR));
+                        let [r, g, b] = color::resolve(fg_src, rc.flags, true, foreground_rgb, &palette);
+                        if ligatures {
+                            // Every cell, spaces included: `run::split` needs
+                            // them to know where runs end.
+                            run_cells.push(crate::run::RunCell { c: rc.c, color: [r, g, b, 1.0] });
+                        } else if rc.c != ' ' {
                             pane_glyphs.push(render::GlyphCell { x, y, c: rc.c, color: [r, g, b, 1.0] });
+                        }
+                    }
+
+                    if ligatures {
+                        let cursor_col = cursor.filter(|(cursor_row, _)| *cursor_row == row).map(|(_, col)| col);
+                        let y = origin.y + row as f32 * cell.1;
+                        for run in crate::run::split(&run_cells, cursor_col) {
+                            pane_runs.push(render::GlyphRun {
+                                x: origin.x + run.start_col as f32 * cell.0,
+                                y,
+                                text: run.text,
+                                color: run.color,
+                            });
                         }
                     }
                 }
@@ -1732,6 +1848,7 @@ impl Graphics {
             background,
             rects.into_iter(),
             glyphs.into_iter(),
+            pane_runs.into_iter(),
         );
 
         let group_names = self.router.group_names();

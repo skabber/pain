@@ -1,12 +1,28 @@
 //! Application entrypoint: a winit window rendered via wgpu.
 
+// Build for the windows subsystem, not the console one. Without this, every
+// launch gets a console: double-clicking the executable opens a black window
+// that then sits there for as long as the terminal is running, and a shell
+// that starts it blocks until it exits. Neither happens on macOS or Linux,
+// which have no equivalent notion — this is a Windows-only default that has
+// to be turned off explicitly.
+//
+// Applied to debug builds too, deliberately, so development exercises the
+// same startup path that ships. `console::attach_to_parent` is what keeps
+// `--help`/`--version`/`--verbose` working from a real terminal; see that
+// module.
+#![windows_subsystem = "windows"]
+
+mod activity;
 mod color;
+mod console;
 mod foreground_process;
 mod graphics;
 mod mouse;
 mod pane_session;
 mod paste;
 mod platform;
+mod run;
 mod session_cwd;
 mod ui;
 mod url;
@@ -28,6 +44,12 @@ use layout::Orientation;
 use graphics::Graphics;
 
 fn main() -> anyhow::Result<()> {
+    // Before anything that might print. On Windows this app has no console
+    // of its own (see the `windows_subsystem` attribute above), so without
+    // this every `--help`, `--version`, `--verbose` line and every logged
+    // error would go nowhere when run from a terminal.
+    console::attach_to_parent();
+
     // `wgpu`/`wgpu-hal` report real backend failures (a DirectComposition
     // call failing, a surface misconfiguration, ...) through the `log`
     // crate, not by returning a message we can catch ourselves — without a

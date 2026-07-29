@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+- Fixed, Windows: starting pain opened a console window that then sat there
+  for as long as the terminal was running, and a shell you launched it from
+  stayed blocked until you closed it. The executable was built as a console
+  application — the default, and the wrong one for something that opens its
+  own window — so Windows gave it a console whether it wanted one or not.
+  It's now built as a normal windowed application, which is why neither
+  macOS nor Linux ever showed this.
+
+  `--help`, `--version` and `--verbose` still print to the terminal you ran
+  them from, and redirecting to a file still works. One difference is
+  unavoidable now that the shell no longer waits: their output arrives just
+  after the prompt comes back, which is how every windowed Windows program
+  with a command line behaves.
+
+- Panes now show a dot in their title bar when something has happened —
+  blue when the shell produced output, red when a program rang the terminal
+  bell. This is for the side pane running a build or tailing a log: you can
+  tell it moved without watching it. The terminal bell was previously read
+  and discarded, so a program ringing it did nothing at all.
+
+  The two clear differently, on purpose. Output only matters for a pane you
+  aren't watching, so focusing it is enough. A bell is a program asking for
+  attention and usually rings the instant a command starts — while its own
+  pane is still focused, because you just pressed Enter there — so it
+  survives focus and clears when you next type into that pane.
+- Over 600 built-in color themes, compiled into the binary — `Dracula`,
+  `Tokyo Night`, `Gruvbox Dark`, `Catppuccin Mocha`, `Solarized Light` and the
+  rest of the familiar names. Pick one from Settings, where the list is
+  filterable, or set `appearance.theme` by hand. A theme supplies the 16 ANSI
+  colors programs draw with plus the default foreground and background, so
+  switching restyles panes that are already open.
+
+  The default is unchanged: `Graphite`, exactly the palette the app has always
+  shipped, so upgrading doesn't restyle anything on its own.
+  `appearance.background_color` is now an override — leave it empty and the
+  background follows the theme, which is what you want since a theme's
+  background is part of its design. A config that already set it keeps that
+  value and keeps overriding.
+- Links a program explicitly marks with the OSC 8 escape sequence — what
+  `cargo` and `gcc` emit — are now `Ctrl+click`-able. Previously only text
+  that *looked* like a URL was matched, so a link whose visible text was an
+  ordinary word was invisible. The same scheme restriction applies either way:
+  only `http`, `https`, `ftp`, `ssh` and `mailto` are ever handed to the
+  operating system, so program output can't turn a click into opening an
+  arbitrary local file.
+- Emoji now render in color. They previously came out as flat monochrome
+  silhouettes, because the color information a font provides was being
+  thrown away and only the shape kept.
+
+  Color glyphs get their own small texture rather than widening the existing
+  one, so ordinary text keeps exactly as much room as it had. Symbols that
+  programs print as text — `✓`, `✗`, `★`, `➜` — deliberately stay
+  monochrome and one cell wide; they have emoji forms, but a test suite's
+  worth of checkmarks turning into colored pictures is not an improvement.
+  Needs a color emoji font installed, which every mainstream desktop has:
+  Noto Color Emoji on Linux, Apple Color Emoji on macOS, Segoe UI Emoji on
+  Windows.
+- Optional ligature support, off by default: `appearance.ligatures`, or the
+  checkbox in Settings. Renders `!=` as `≠` and `=>` as `⇒` with a font that
+  provides them (Fira Code, JetBrains Mono, Cascadia Code, Iosevka). Never
+  applied across a color change or across the cursor, so editing `!=` still
+  shows which character you're on.
+
+  Off by default deliberately, and it stays a separate rendering path rather
+  than replacing the existing one: shaping hands glyph positioning to the
+  font's own advances instead of the cell grid, and costs real per-frame work.
+  Neither is worth imposing on someone who didn't ask for ligatures.
+
 ## v1.6.1
 
 - Fixed: changing the font size a few times crashed the terminal. Every

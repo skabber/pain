@@ -63,6 +63,32 @@ backgrounds (declined as fluff), and the long-standing WSL cwd-tracking
 gap. Rendering is a single direct-to-swapchain pass with no offscreen
 target, so any post-processing would need that refactor first.
 
+**CONOPS §8 is now closed.** The open "default theme/color scheme and
+bundled presets" question was settled 2026-07-28: over 600 built-in
+themes vendored from iTerm2-Color-Schemes, with the app's existing
+"Graphite" palette kept as the unchanged default.
+
+**Settled 2026-07-28, do not re-raise:**
+
+- **OSC 133 / semantic prompt marking — declined.** The developer's rule:
+  don't invent functionality that isn't naturally part of the shells
+  people use. (iTerm2 *does* support it — it originated there — but bare
+  bash/zsh emit nothing, which is the half of the criterion that
+  decided it.)
+- **CLI `+` subcommands (`+list-themes`, `+show-config`) — declined.**
+- **In-terminal images / Kitty graphics protocol — declined.**
+- **Color emoji — built 2026-07-28**, after the developer overruled the
+  deferral ("all the other terminals do it"). Landed cheaper than the
+  original estimate: a *second, small* RGBA atlas (1024², 4MB) beside the
+  unchanged coverage atlas, rather than widening the main one to RGBA —
+  which would have cost 16MB *and* quartered how many ordinary text
+  glyphs fit before a repack. See the memory log, including the font-
+  fallback bug that would otherwise have made the whole feature invisible.
+- **Wide characters are NOT broken.** Flagged as a suspected bug and
+  withdrawn after checking: `alacritty_terminal` writes a blank
+  `WIDE_CHAR_SPACER` after each wide char, so CJK/emoji layout is
+  correct. Only the monochrome-emoji issue above is real.
+
 Between Milestone 6 and Milestone 7, the developer requested an out-of-plan
 feature — pane title bars, colored/named groups, and related chrome — not
 in `v1-build-plan.md` at all (asked about directly, then specified in full
@@ -93,6 +119,22 @@ full account. Layout/window-size restore confirmed working on real
 hardware; the shell-integration fix itself and PowerShell specifically are
 not yet re-verified there — needs another pass before Milestone 8
 (cross-platform pass) starts.
+
+**Uncommitted, awaiting review (2026-07-28)** — a feature pass drawn from
+studying herdr.dev and ghostty.org at the developer's request. Four
+things, plus color emoji.
+
+**Confirmed working on the developer's real hardware:** color emoji,
+ligatures, and the theme picker. **Confirmed and then fixed:** the pane
+activity indicator — it was a square rather than a dot (now drawn as a
+`\u{25CF}` glyph), and a bell rung in the *focused* pane was erased before
+it could be seen (see `.waypoint/features/pane-activity.md`; the rule now
+clears a bell on input rather than on focus). **Still unverified:** the
+Windows console fix, which the developer will test after the next
+release. Full account in the memory log. One thing needing the
+developer's judgement: OSC 8 links are held to the same scheme allowlist
+as pattern-matched ones, which means `ls --hyperlink`'s `file://` links
+are deliberately not clickable.
 
 **Shipped:**
 

@@ -65,6 +65,23 @@ pub fn find(line: &str) -> Vec<Match> {
     matches
 }
 
+/// Whether `uri` uses a scheme this app is willing to hand to the OS.
+///
+/// Applied to OSC 8 hyperlinks as well as pattern-matched ones. An OSC 8
+/// target is explicit rather than guessed, but it is still arbitrary program
+/// output — a log line, or a file someone `cat`ed — choosing both the link
+/// text and a target that need not resemble it. Handing an unrestricted URI
+/// to the OS handler on Ctrl+click is a wider capability than this app's
+/// stated conservative policy allows, so the same allowlist governs both.
+///
+/// The visible cost is that `ls --hyperlink`'s `file://` links aren't
+/// clickable. That's the same deliberate call [`SCHEMES`] already documents,
+/// held consistently rather than relaxed as a side effect of adding OSC 8.
+pub fn is_allowed_scheme(uri: &str) -> bool {
+    let lower = uri.to_lowercase();
+    SCHEMES.iter().any(|scheme| lower.starts_with(scheme))
+}
+
 fn starts_with_at(haystack: &[char], at: usize, needle: &str) -> bool {
     let needle: Vec<char> = needle.chars().collect();
     if at + needle.len() > haystack.len() {
@@ -155,5 +172,25 @@ mod tests {
         let m = &find(line)[0];
         assert_eq!(m.start, 3);
         assert_eq!(url_at(line, 3).as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn allowed_schemes_match_the_ones_pattern_detection_accepts() {
+        assert!(is_allowed_scheme("https://example.com"));
+        assert!(is_allowed_scheme("http://example.com"));
+        assert!(is_allowed_scheme("mailto:someone@example.com"));
+        assert!(is_allowed_scheme("HTTPS://EXAMPLE.COM"), "scheme matching is case-insensitive");
+    }
+
+    /// The schemes an OSC 8 hyperlink must not be able to smuggle past the
+    /// same policy pattern detection already enforces. `file:` is the one
+    /// that matters in practice: `ls --hyperlink` emits it constantly.
+    #[test]
+    fn disallowed_schemes_are_rejected_however_they_arrive() {
+        assert!(!is_allowed_scheme("file:///home/user/.ssh/id_rsa"));
+        assert!(!is_allowed_scheme("javascript:alert(1)"));
+        assert!(!is_allowed_scheme("data:text/html;base64,PHNjcmlwdD4="));
+        assert!(!is_allowed_scheme("/plain/path"));
+        assert!(!is_allowed_scheme(""));
     }
 }

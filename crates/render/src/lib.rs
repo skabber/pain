@@ -6,7 +6,7 @@ mod glyph;
 
 use bytemuck::{Pod, Zeroable};
 
-pub use glyph::{GlyphRasterizer, RasterizedGlyph, monospace_font_families, system_ui_font_data};
+pub use glyph::{GlyphRasterizer, RasterizedGlyph, ShapedGlyph, monospace_font_families, system_ui_font_data};
 
 /// Measures a font's cell size at `font_size_px` in `font_family` (`""` or
 /// `"monospace"` for the system default): the advance width of a
@@ -36,6 +36,11 @@ struct Instance {
     uv_origin: [f32; 2],
     uv_size: [f32; 2],
     color: [f32; 4],
+    /// 1.0 to sample the color atlas and use the glyph's own colors, 0.0 to
+    /// sample the coverage atlas and tint by `color`. A float rather than a
+    /// `u32` flag so the vertex format stays uniformly `Float32*` — there is
+    /// exactly one bit of information here and nowhere to grow.
+    colored: f32,
 }
 
 #[repr(C)]
@@ -52,6 +57,20 @@ pub struct GlyphCell {
     pub x: f32,
     pub y: f32,
     pub c: char,
+    pub color: [f32; 4],
+}
+
+/// A run of characters to shape and draw together, so the font can apply
+/// ligatures across them. The ligature-mode counterpart to [`GlyphCell`].
+///
+/// `x`/`y` are the absolute pixel position of the run's first cell. Glyphs
+/// within the run are then placed by the font's own advances rather than by
+/// cell arithmetic — so the caller must only group cells where ligating is
+/// actually correct: one color, and no cursor sitting inside the run.
+pub struct GlyphRun {
+    pub x: f32,
+    pub y: f32,
+    pub text: String,
     pub color: [f32; 4],
 }
 
@@ -129,6 +148,21 @@ impl GridRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Color glyphs (emoji) live in their own RGBA texture — see
+                // `atlas::COLOR_ATLAS_SIZE`. Both are bound for every draw
+                // and the fragment shader picks per instance, rather than
+                // splitting into two pipelines and two passes for what is
+                // usually a handful of glyphs.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -139,6 +173,7 @@ impl GridRenderer {
                 wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&atlas.color_view) },
             ],
         });
 
@@ -174,6 +209,7 @@ impl GridRenderer {
                             3 => Float32x2,
                             4 => Float32x2,
                             5 => Float32x4,
+                            6 => Float32,
                         ],
                     },
                 ],
@@ -236,6 +272,7 @@ impl GridRenderer {
         background: wgpu::Color,
         rects: impl Iterator<Item = SolidRect>,
         glyphs: impl Iterator<Item = GlyphCell>,
+        runs: impl Iterator<Item = GlyphRun>,
     ) {
         queue.write_buffer(
             &self.globals_buffer,
@@ -252,6 +289,7 @@ impl GridRenderer {
                 uv_origin: self.atlas.solid_uv,
                 uv_size: [0.0, 0.0],
                 color: rect.color,
+                colored: 0.0,
             });
         }
 
@@ -271,7 +309,33 @@ impl GridRenderer {
                 uv_origin: entry.uv_origin,
                 uv_size: entry.uv_size,
                 color: glyph.color,
+                colored: if entry.colored { 1.0 } else { 0.0 },
             });
+        }
+
+        for run in runs {
+            // The baseline sits `font_size_px` below the run's top edge,
+            // same as the per-character path.
+            let pen_y = run.y + font_size_px;
+            // Collected because `shape_run` borrows the atlas mutably and so
+            // does `shaped_entry` — the shaped glyphs are small and there is
+            // one run per contiguous stretch of same-colored cells, not one
+            // per cell.
+            let shaped: Vec<glyph::ShapedGlyph> = self.atlas.shape_run(&run.text, font_size_px, font_family).to_vec();
+
+            for glyph in shaped {
+                let Some(entry) = self.atlas.shaped_entry(queue, glyph, font_size_px, font_family) else {
+                    continue;
+                };
+                instances.push(Instance {
+                    pos: [(run.x + glyph.x as f32 + entry.left).round(), (pen_y + glyph.y as f32 - entry.top).round()],
+                    size: [entry.width, entry.height],
+                    uv_origin: entry.uv_origin,
+                    uv_size: entry.uv_size,
+                    color: run.color,
+                    colored: if entry.colored { 1.0 } else { 0.0 },
+                });
+            }
         }
 
         if instances.len() > self.instance_capacity {

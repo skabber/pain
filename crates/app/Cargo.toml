@@ -34,6 +34,17 @@ webbrowser = "1.2.1"
 wgpu = "29.0.4"
 winit = "0.30.13"
 
+# Console attachment only (`src/console.rs`) — this binary is built for the
+# windows subsystem, so it has to opt back in to writing to the terminal it
+# was launched from. Already in the dependency tree via winit/wgpu, so
+# declaring it directly adds nothing to the build.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
+
 # `cargo deb` reads this to build the .deb (see `cargo install cargo-deb`,
 # then `cargo deb -p pain` from the workspace root). `depends` starts with
 # `$auto` (cargo-deb's own `dpkg-shlibdeps`-based detection, which only

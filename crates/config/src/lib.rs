@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod themes;
+
 /// Directory name under the platform's config root — a working name (the
 /// product itself doesn't have a settled one yet, same open state as the
 /// theme question in CONOPS §8), picked from this repo's own directory
@@ -73,21 +75,45 @@ impl Default for General {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Appearance {
-    /// Named preset — the only shape this can take until the theme/preset
-    /// format itself is decided (CONOPS §8, still open); no inline color
-    /// table support yet.
+    /// Name of a built-in theme (see [`themes::THEMES`]) — the source of
+    /// the 16 ANSI colors and the default foreground/background a cell
+    /// falls back to. An unrecognized name resolves to
+    /// [`themes::DEFAULT_THEME`] rather than failing to load, the same
+    /// "never crash on a bad edit" convention as the color fields.
+    ///
+    /// No inline color table support: a theme is picked by name, and a
+    /// one-off tweak is what `background_color` is for.
     pub theme: String,
     pub font_family: String,
     pub font_size: f32,
+    /// Shape each row's text in runs so the font can apply ligatures
+    /// (`!=` rendering as `≠`), rather than rasterizing every cell
+    /// independently.
+    ///
+    /// **Off by default, deliberately.** A terminal grid is fixed-width and
+    /// this hands glyph positioning to the font's own advances: with a font
+    /// designed for it (Fira Code, JetBrains Mono, Cascadia Code, Iosevka)
+    /// that lines up exactly, but a font whose ligature advances don't match
+    /// its cell width will drift out of the grid. It also costs real work
+    /// per frame that the per-character path doesn't — text has to be shaped,
+    /// not just looked up. Neither is a cost to impose on someone who never
+    /// asked for ligatures.
+    pub ligatures: bool,
     /// 0.0 (fully transparent) – 1.0 (opaque).
     pub transparency: f32,
-    /// Terminal background, as `#rrggbb` hex — a near-black slate by
-    /// default (the "Graphite" palette), not pure black; a plain color
-    /// setting rather than part of the still-open theme system (CONOPS
-    /// §8), a real theme replaces this later. Parse failures (a hand-
-    /// edited value that isn't valid hex) fall back to this same default
-    /// via `background_rgb`, not a load error — consistent with the rest
-    /// of this config's "never crash on a bad edit" handling.
+    /// Terminal background override, as `#rrggbb` hex.
+    ///
+    /// **Empty means "follow the chosen theme"**, which is the default —
+    /// a theme's background is part of its identity, and a light theme
+    /// forced onto a near-black ground is unreadable. A non-empty value
+    /// wins over the theme, so a config that set this before themes
+    /// existed keeps doing exactly what its author asked for rather than
+    /// silently losing the setting.
+    ///
+    /// Parse failures (a hand-edited value that isn't valid hex) fall back
+    /// to the theme's background via `background_rgb`, not a load error —
+    /// consistent with the rest of this config's "never crash on a bad
+    /// edit" handling.
     pub background_color: String,
     /// The one accent color used throughout the chrome — cursor, text
     /// selection, focus/interactive highlights in menus and the settings
@@ -105,34 +131,70 @@ pub struct Appearance {
 /// to parse.
 const DEFAULT_ACCENT_RGB: [f32; 3] = [127.0 / 255.0, 162.0 / 255.0, 214.0 / 255.0];
 
-/// "Graphite" palette's own near-black ground — the default
-/// `background_color`, and its own parse-failure fallback.
-const DEFAULT_BACKGROUND_RGB: [f32; 3] = [12.0 / 255.0, 14.0 / 255.0, 17.0 / 255.0];
-
 impl Default for Appearance {
     fn default() -> Self {
         Appearance {
-            theme: "default".to_string(),
+            theme: themes::DEFAULT_THEME.to_string(),
             font_family: "monospace".to_string(),
             font_size: 13.0,
+            ligatures: false,
             transparency: 1.0,
-            background_color: format_hex_rgb(DEFAULT_BACKGROUND_RGB),
+            // Empty: follow the theme. See the field's own doc comment.
+            background_color: String::new(),
             accent_color: format_hex_rgb(DEFAULT_ACCENT_RGB),
         }
     }
 }
 
+/// Unpacks a `0xRRGGBB` theme color into 0.0–1.0 RGB.
+fn unpack_rgb(packed: u32) -> [f32; 3] {
+    let channel = |shift: u32| ((packed >> shift) & 0xff) as f32 / 255.0;
+    [channel(16), channel(8), channel(0)]
+}
+
 impl Appearance {
-    /// Parses `background_color` into 0.0–1.0 RGB, falling back to the
-    /// Graphite default if it isn't valid `#rrggbb` (or `rrggbb`) hex.
+    /// The built-in theme `theme` names, falling back to the default for an
+    /// unset or unrecognized name.
+    pub fn resolved_theme(&self) -> &'static themes::Theme {
+        themes::find(&self.theme).unwrap_or_else(themes::default_theme)
+    }
+
+    /// The 16 ANSI colors (0-7 normal, 8-15 bright) of the chosen theme, as
+    /// 0.0–1.0 RGB.
+    pub fn palette(&self) -> [[f32; 3]; 16] {
+        self.resolved_theme().ansi.map(unpack_rgb)
+    }
+
+    /// What a cell left at its default foreground color resolves to — the
+    /// chosen theme's foreground.
+    pub fn foreground_rgb(&self) -> [f32; 3] {
+        unpack_rgb(self.resolved_theme().foreground)
+    }
+
+    /// The effective terminal background: `background_color` if it's set to
+    /// valid hex, otherwise the chosen theme's own background.
     pub fn background_rgb(&self) -> [f32; 3] {
-        parse_hex_rgb(&self.background_color).unwrap_or(DEFAULT_BACKGROUND_RGB)
+        parse_hex_rgb(&self.background_color).unwrap_or_else(|| unpack_rgb(self.resolved_theme().background))
     }
 
     /// Sets `background_color` from 0.0–1.0 RGB (e.g. from a UI color
     /// picker), formatted as `#rrggbb` — the inverse of `background_rgb`.
+    /// This makes it an explicit override; see `follow_theme_background` to
+    /// undo it.
     pub fn set_background_rgb(&mut self, rgb: [f32; 3]) {
         self.background_color = format_hex_rgb(rgb);
+    }
+
+    /// Clears any background override, so the background follows whichever
+    /// theme is chosen.
+    pub fn follow_theme_background(&mut self) {
+        self.background_color.clear();
+    }
+
+    /// Whether the background currently follows the theme rather than an
+    /// explicit override.
+    pub fn follows_theme_background(&self) -> bool {
+        self.background_color.is_empty()
     }
 
     /// Parses `accent_color` into 0.0–1.0 RGB, falling back to the
@@ -410,11 +472,74 @@ mod tests {
     }
 
     #[test]
-    fn background_color_falls_back_to_the_graphite_default_when_invalid() {
+    fn background_color_falls_back_to_the_theme_when_invalid() {
         assert_eq!(parse_hex_rgb("not-a-color"), None);
         assert_eq!(parse_hex_rgb("#zzzzzz"), None);
         let appearance = Appearance { background_color: "garbage".to_string(), ..Appearance::default() };
-        assert_eq!(appearance.background_rgb(), DEFAULT_BACKGROUND_RGB);
+        assert_eq!(appearance.background_rgb(), unpack_rgb(themes::default_theme().background));
+    }
+
+    /// The default has no override, so the background is the theme's — and
+    /// changing theme moves it. A theme's background is part of its
+    /// identity; a light theme on a forced near-black ground is unreadable.
+    #[test]
+    fn an_unset_background_follows_the_chosen_theme() {
+        let mut appearance = Appearance::default();
+        assert!(appearance.follows_theme_background());
+        assert_eq!(appearance.background_rgb(), unpack_rgb(themes::default_theme().background));
+
+        appearance.theme = "Dracula".to_string();
+        assert_eq!(appearance.background_rgb(), unpack_rgb(0x282a36));
+    }
+
+    /// A config written before themes existed set this explicitly. That
+    /// value has to keep winning, or upgrading would silently discard a
+    /// setting its author deliberately chose.
+    #[test]
+    fn an_explicit_background_overrides_the_theme() {
+        let appearance =
+            Appearance { theme: "Dracula".to_string(), background_color: "#123456".to_string(), ..Default::default() };
+        assert!(!appearance.follows_theme_background());
+        assert_eq!(appearance.background_rgb(), parse_hex_rgb("#123456").unwrap());
+    }
+
+    #[test]
+    fn following_the_theme_background_again_clears_an_override() {
+        let mut appearance = Appearance { theme: "Dracula".to_string(), ..Default::default() };
+        appearance.set_background_rgb([1.0, 0.0, 0.0]);
+        assert!(!appearance.follows_theme_background());
+
+        appearance.follow_theme_background();
+        assert!(appearance.follows_theme_background());
+        assert_eq!(appearance.background_rgb(), unpack_rgb(0x282a36));
+    }
+
+    #[test]
+    fn an_unrecognized_theme_name_resolves_to_the_default_rather_than_failing() {
+        let appearance = Appearance { theme: "no such theme".to_string(), ..Default::default() };
+        assert_eq!(appearance.resolved_theme().name, themes::DEFAULT_THEME);
+    }
+
+    #[test]
+    fn the_palette_unpacks_a_themes_sixteen_ansi_slots() {
+        let appearance = Appearance { theme: "Dracula".to_string(), ..Default::default() };
+        let palette = appearance.palette();
+        assert_eq!(palette[1], unpack_rgb(0xff5555), "ANSI red");
+        assert_eq!(palette[8], unpack_rgb(0x6272a4), "ANSI bright black");
+        assert_eq!(appearance.foreground_rgb(), unpack_rgb(0xf8f8f2));
+    }
+
+    /// The shipped default must be visually identical to what the app
+    /// looked like before themes existed, or every existing user's terminal
+    /// silently restyles on upgrade.
+    #[test]
+    fn the_default_theme_preserves_the_original_graphite_look() {
+        let appearance = Appearance::default();
+        assert_eq!(appearance.background_rgb(), [12.0 / 255.0, 14.0 / 255.0, 17.0 / 255.0]);
+        assert_eq!(appearance.foreground_rgb(), [223.0 / 255.0, 226.0 / 255.0, 230.0 / 255.0]);
+        // xterm's standard palette, which is what `color.rs` hardcoded.
+        assert_eq!(appearance.palette()[0], [0.0, 0.0, 0.0]);
+        assert_eq!(appearance.palette()[15], [1.0, 1.0, 1.0]);
     }
 
     #[test]

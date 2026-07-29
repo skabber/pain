@@ -142,9 +142,23 @@ Select a word.
 Select a line.
 .TP
 .B Ctrl+click
-Open the URL under the pointer in your browser. Holding
+Open the link under the pointer in your browser. Holding
 .B Ctrl
-underlines the URL first, so you can see what will open before clicking.
+underlines it first, so you can see what will open before clicking.
+A link a program marked explicitly with the
+.B OSC 8
+escape sequence takes precedence, and otherwise the visible text is matched
+for a URL. Only
+.BR http ,
+.BR https ,
+.BR ftp ,
+.B ssh
+and
+.B mailto
+are ever handed to the operating system, whichever way the link was found:
+a terminal prints paths and arbitrary program output constantly, and
+opening any of that with the system's default handler on a click is a
+wider capability than this is willing to grant.
 .TP
 .B Shift+click
 Force a local text selection, bypassing mouse reporting. This is the
@@ -159,6 +173,25 @@ Open the terminal menu: copy, paste, close.
 .TP
 .B Scroll wheel
 Scroll back through that pane's history.
+.SH PANE ACTIVITY
+A pane you are not currently focused on shows a dot in its title bar when
+something has happened in it, so a build or a log tail off to the side does
+not have to be watched.
+.TP
+.B Blue
+The shell produced output since that pane was last focused. Cleared by
+focusing the pane.
+.TP
+.B Red
+A program rang the terminal bell. Cleared by typing into the pane.
+.PP
+A bell outranks output, since it is a program explicitly asking for
+attention rather than something a pane merely did, and the two are cleared
+differently on purpose. Output only matters for a pane you are not
+watching, so looking at it suffices. A bell usually rings the instant a
+command starts \(em while its own pane is still focused, because you just
+pressed Enter there \(em so it survives focus and clears on the next input
+to that pane, which is what actually demonstrates you saw it.
 .SH CONFIGURATION
 Configuration is a TOML file, read at startup and re-read when it changes.
 Every key is optional and anything missing uses its default, so a partial
@@ -202,9 +235,29 @@ arrives.
 .TP
 .B theme
 String, default
-.BR \(dqdefault\(dq .
-Reserved; the theme format is not settled and this currently has no other
-valid value.
+.BR \(dqGraphite\(dq .
+Names one of over 600 built-in color themes, which supply the 16 ANSI
+colors programs draw with plus the default foreground and background.
+Familiar names apply:
+.BR Dracula ,
+.BR \(dqTokyo Night\(dq ,
+.BR \(dqGruvbox Dark\(dq ,
+.BR \(dqSolarized Light\(dq .
+Matching ignores case, and an unrecognised name falls back to the default
+rather than failing to load. The settings panel lists them with a filter.
+.TP
+.B ligatures
+Boolean, default
+.BR false .
+Shape each row's text in runs so a font can render
+.B !=
+as a single glyph. Requires a font that provides ligatures \(em Fira Code,
+JetBrains Mono, Cascadia Code, Iosevka \(em and has no visible effect with
+any other. Off by default because glyph positions then come from the font's
+own advances rather than the cell grid, so a font whose ligature widths do
+not match its cell width drifts out of alignment, and because shaping costs
+per-frame work the default path does not. A ligature is never applied
+across a color change or across the cursor.
 .TP
 .B font_family
 String, default
@@ -233,9 +286,14 @@ Number from
 .B background_color
 String,
 .B #rrggbb
-hex, default
-.BR \(dq#0c0e11\(dq .
-An unparseable value falls back to the default rather than failing to load.
+hex, default empty.
+Overrides the terminal background. Empty \(em the default \(em means the
+background follows whichever
+.B theme
+is chosen, which is usually what you want, since a theme's background is
+part of its design and a light theme forced onto a dark ground is
+unreadable. A non-empty value wins over the theme. An unparseable value
+falls back to the theme's background rather than failing to load.
 .TP
 .B accent_color
 String,

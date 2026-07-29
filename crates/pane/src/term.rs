@@ -31,12 +31,23 @@ impl Dimensions for TermSize {
     }
 }
 
-/// Forwards the one event a pane's screen actually needs to act on:
-/// `Event::PtyWrite`, `alacritty_terminal`'s way of asking the frontend to
-/// write a reply back to the PTY's input — used for things like device
-/// status reports and cursor-position queries. Some shells' startup
-/// handshakes (notably Windows ConPTY/conhost) block waiting for these and
-/// never produce any further output without a reply.
+/// One of the two `alacritty_terminal` events a pane's screen acts on,
+/// carried over a single channel so their relative order can't be lost.
+enum ScreenEvent {
+    /// `alacritty_terminal` asking the frontend to write a reply back to the
+    /// PTY's input — device status reports, cursor-position queries. Some
+    /// shells' startup handshakes (notably Windows ConPTY/conhost) block
+    /// waiting for these and never produce any further output without a
+    /// reply.
+    PtyWrite(Vec<u8>),
+    /// The program rang the terminal bell (`BEL`, `0x07`). Surfaced so an
+    /// unfocused pane can flag that it wants attention — see
+    /// [`Screen::take_bell`].
+    Bell,
+}
+
+/// Forwards the events a pane's screen actually needs to act on. See
+/// [`ScreenEvent`] for what those are and why.
 ///
 /// `Event::Title`/`Event::ResetTitle` (OSC 0/1/2) used to be forwarded here
 /// too, for the pane title bar's "current application" label — reverted:
@@ -46,16 +57,19 @@ impl Dimensions for TermSize {
 /// foreground-process detection (`pane::Pty::foreground_pgid` on Unix via
 /// `tcgetpgrp`, `crates/app/src/foreground_process.rs`'s process-tree walk
 /// on Windows) — see project memory for the full reasoning. Every other
-/// event (title changes, bell, clipboard) is discarded; broadcast/grouping
-/// and chrome react to those independently already.
+/// event (clipboard, color queries) is discarded; broadcast/grouping and
+/// chrome react to those independently already.
 #[derive(Clone)]
-struct EventProxy(Sender<Vec<u8>>);
+struct EventProxy(Sender<ScreenEvent>);
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            let _ = self.0.send(text.into_bytes());
-        }
+        let forwarded = match event {
+            Event::PtyWrite(text) => ScreenEvent::PtyWrite(text.into_bytes()),
+            Event::Bell => ScreenEvent::Bell,
+            _ => return,
+        };
+        let _ = self.0.send(forwarded);
     }
 }
 
@@ -80,7 +94,12 @@ pub struct RenderCell {
 pub struct Screen {
     term: Term<EventProxy>,
     parser: Processor,
-    pty_writes: Receiver<Vec<u8>>,
+    events: Receiver<ScreenEvent>,
+    /// Drained out of `events` by [`Screen::drain_events`] and held until
+    /// [`Screen::take_pty_writes`] collects it.
+    pending_writes: Vec<u8>,
+    /// Set by [`Screen::drain_events`], cleared by [`Screen::take_bell`].
+    bell_rang: bool,
     cwd: crate::cwd::CwdWatcher,
     /// Kept so [`Screen::set_scrollback`] can change one field without
     /// resetting the rest of what `Term` was configured with.
@@ -101,7 +120,15 @@ impl Screen {
         let (tx, rx) = mpsc::channel();
         let config = Config { scrolling_history: scrollback, ..Config::default() };
         let term = Term::new(config.clone(), &dimensions, EventProxy(tx));
-        Self { term, parser: Processor::new(), pty_writes: rx, cwd: crate::cwd::CwdWatcher::new(), config }
+        Self {
+            term,
+            parser: Processor::new(),
+            events: rx,
+            pending_writes: Vec::new(),
+            bell_rang: false,
+            cwd: crate::cwd::CwdWatcher::new(),
+            config,
+        }
     }
 
     /// Changes how many lines of history this screen retains, for a live
@@ -140,16 +167,38 @@ impl Screen {
         self.term.resize(TermSize { columns: size.cols as usize, lines: size.rows as usize });
     }
 
+    /// Moves everything the event channel is holding into the per-kind
+    /// fields the `take_*` accessors read.
+    ///
+    /// Both accessors call this first, so neither can consume an event
+    /// meant for the other — draining the channel directly inside each one
+    /// would mean whichever ran first silently discarded the other's
+    /// events.
+    fn drain_events(&mut self) {
+        while let Ok(event) = self.events.try_recv() {
+            match event {
+                ScreenEvent::PtyWrite(bytes) => self.pending_writes.extend(bytes),
+                ScreenEvent::Bell => self.bell_rang = true,
+            }
+        }
+    }
+
     /// Drains any bytes the terminal needs written back to the PTY's input
     /// since the last call (e.g. a cursor-position report reply). Callers
     /// must forward these to the pane's `Pty::write` — some shells block
     /// waiting for them.
     pub fn take_pty_writes(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        while let Ok(bytes) = self.pty_writes.try_recv() {
-            out.extend(bytes);
-        }
-        out
+        self.drain_events();
+        std::mem::take(&mut self.pending_writes)
+    }
+
+    /// Whether the program rang the terminal bell since the last call,
+    /// clearing the flag. Multiple bells between calls collapse into one —
+    /// this answers "does this pane want attention?", and ringing twice
+    /// doesn't want it twice as much.
+    pub fn take_bell(&mut self) -> bool {
+        self.drain_events();
+        std::mem::replace(&mut self.bell_rang, false)
     }
 
     /// Returns the visible screen contents, one string per row, with
@@ -295,6 +344,58 @@ impl Screen {
     pub fn selection_range(&self) -> Option<SelectionRange> {
         self.term.selection.as_ref().and_then(|s| s.to_range(&self.term))
     }
+
+    /// The OSC 8 hyperlink on the cell at 0-indexed (`row`, `col`) within
+    /// the visible screen, plus the span of columns sharing it.
+    ///
+    /// This is an explicit escape sequence — `ls --hyperlink`, `cargo`, and
+    /// similar tools marking text as a link — as opposed to the app's own
+    /// pattern-matching over what a line happens to look like. It is
+    /// authoritative where it exists: the program said what the target is,
+    /// so there's nothing to guess and the link text needn't resemble a URL
+    /// at all.
+    ///
+    /// Deliberately a point query rather than a field on
+    /// [`RenderCell`]: this is only ever needed for the cell under the
+    /// pointer, and carrying a link on every cell would add a refcount
+    /// bump per cell per frame to the render path for something almost
+    /// always absent.
+    ///
+    /// The span stops at the row's edges. A link wrapped across rows
+    /// reports only the part on this one, which is what the underline
+    /// should cover anyway.
+    pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<HyperlinkMatch> {
+        let grid = self.term.grid();
+        if row >= grid.screen_lines() || col >= grid.columns() {
+            return None;
+        }
+        let line = &grid[Line(row as i32 - grid.display_offset() as i32)];
+        let target = line[Column(col)].hyperlink()?;
+
+        // Equality covers both id and URI, so two runs that merely share a
+        // URI stay separate links — which is exactly what an explicit OSC 8
+        // id is for.
+        let same = |c: usize| line[Column(c)].hyperlink().is_some_and(|link| link == target);
+        let mut start = col;
+        while start > 0 && same(start - 1) {
+            start -= 1;
+        }
+        let mut end = col + 1;
+        while end < grid.columns() && same(end) {
+            end += 1;
+        }
+
+        Some(HyperlinkMatch { uri: target.uri().to_string(), start, end })
+    }
+}
+
+/// An OSC 8 hyperlink found under a grid cell: its target, and the half-open
+/// range of columns on that row which are part of the same link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HyperlinkMatch {
+    pub uri: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[cfg(test)]
@@ -416,6 +517,106 @@ mod tests {
 
         let reply = screen.take_pty_writes();
         assert_eq!(reply, b"\x1b[3;7R");
+    }
+
+    #[test]
+    fn a_bel_byte_raises_the_bell_flag_once_and_then_clears_it() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
+        assert!(!screen.take_bell());
+
+        screen.advance(b"done\x07");
+
+        assert!(screen.take_bell(), "BEL should raise the bell flag");
+        assert!(!screen.take_bell(), "taking the bell should clear it");
+        // The bell is a side channel, not a printed character.
+        assert_eq!(screen.visible_rows()[0], "done");
+    }
+
+    #[test]
+    fn repeated_bells_between_takes_collapse_into_one() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
+        screen.advance(b"\x07\x07\x07");
+
+        assert!(screen.take_bell());
+        assert!(!screen.take_bell());
+    }
+
+    /// Both accessors drain the same channel, so one must not be able to
+    /// swallow the other's events. Draining inside each accessor
+    /// independently would make this fail: whichever ran first would
+    /// consume — and discard — the other kind.
+    #[test]
+    fn taking_the_bell_does_not_consume_a_pending_pty_reply() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
+        // A bell and a cursor-position query, in that order.
+        screen.advance(b"\x07\x1b[6n");
+
+        assert!(screen.take_bell());
+        assert_eq!(screen.take_pty_writes(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn taking_pty_writes_does_not_consume_a_pending_bell() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 20 }, 100);
+        screen.advance(b"\x1b[6n\x07");
+
+        assert_eq!(screen.take_pty_writes(), b"\x1b[1;1R");
+        assert!(screen.take_bell());
+    }
+
+    /// Writes `text` as an OSC 8 hyperlink to `uri`. `id` distinguishes two
+    /// runs that share a URI but are meant as separate links.
+    fn osc8(id: &str, uri: &str, text: &str) -> String {
+        format!("\x1b]8;id={id};{uri}\x1b\\{text}\x1b]8;;\x1b\\")
+    }
+
+    #[test]
+    fn an_osc_8_hyperlink_is_found_under_its_own_cells_and_spans_them() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 40 }, 100);
+        screen.advance(format!("see {} ok", osc8("a", "https://example.com", "this link")).as_bytes());
+
+        // "see " is columns 0-3, so the link text occupies 4..13.
+        let found = screen.hyperlink_at(0, 6).expect("the cell should carry a hyperlink");
+        assert_eq!(found.uri, "https://example.com");
+        assert_eq!((found.start, found.end), (4, 13));
+
+        // The link text needn't look like a URL at all — that's the whole
+        // point of the program declaring it.
+        assert_eq!(screen.visible_rows()[0], "see this link ok");
+    }
+
+    #[test]
+    fn cells_outside_a_hyperlink_carry_none() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 40 }, 100);
+        screen.advance(format!("see {} ok", osc8("a", "https://example.com", "link")).as_bytes());
+
+        assert!(screen.hyperlink_at(0, 0).is_none(), "plain text before the link");
+        assert!(screen.hyperlink_at(0, 9).is_none(), "plain text after the link");
+        assert!(screen.hyperlink_at(1, 0).is_none(), "an empty row");
+    }
+
+    /// Two runs with the same URI but different ids are two links, and the
+    /// span of one must not swallow the other. Comparing by URI alone would
+    /// merge them.
+    #[test]
+    fn adjacent_links_sharing_a_uri_stay_separate() {
+        let mut screen = Screen::new(Size { rows: 5, cols: 40 }, 100);
+        let uri = "https://example.com";
+        screen.advance(format!("{}{}", osc8("one", uri, "aaa"), osc8("two", uri, "bbb")).as_bytes());
+
+        let first = screen.hyperlink_at(0, 1).expect("first link");
+        let second = screen.hyperlink_at(0, 4).expect("second link");
+        assert_eq!((first.start, first.end), (0, 3));
+        assert_eq!((second.start, second.end), (3, 6));
+    }
+
+    #[test]
+    fn a_hyperlink_query_outside_the_grid_returns_none_rather_than_panicking() {
+        let mut screen = Screen::new(Size { rows: 3, cols: 10 }, 100);
+        screen.advance(osc8("a", "https://example.com", "hi").as_bytes());
+
+        assert!(screen.hyperlink_at(99, 0).is_none());
+        assert!(screen.hyperlink_at(0, 99).is_none());
     }
 
     #[test]

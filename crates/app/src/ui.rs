@@ -184,10 +184,18 @@ pub struct UiRequest {
 /// and keeping the draft's shape flat avoids threading `&mut
 /// config.appearance.font_size`-style paths through egui widget calls.
 struct SettingsDraft {
+    theme: String,
+    /// Substring the theme list is filtered by. Panel state, not a setting —
+    /// there are hundreds of built-in themes, so an unfiltered list is not a
+    /// usable way to find one.
+    theme_filter: String,
     font_family: String,
     font_size: f32,
+    ligatures: bool,
     transparency: f32,
-    background_color: [f32; 3],
+    /// `None` means "follow the chosen theme", matching
+    /// `config::Appearance::background_color`'s empty-string convention.
+    background_color: Option<[f32; 3]>,
     accent_color: [f32; 3],
     scrollback_lines: usize,
     default_shell: String,
@@ -197,10 +205,17 @@ struct SettingsDraft {
 impl SettingsDraft {
     fn from_config(config: &config::Config) -> Self {
         Self {
+            theme: config.appearance.theme.clone(),
+            theme_filter: String::new(),
             font_family: config.appearance.font_family.clone(),
             font_size: config.appearance.font_size,
+            ligatures: config.appearance.ligatures,
             transparency: config.appearance.transparency,
-            background_color: config.appearance.background_rgb(),
+            background_color: if config.appearance.follows_theme_background() {
+                None
+            } else {
+                Some(config.appearance.background_rgb())
+            },
             accent_color: config.appearance.accent_rgb(),
             scrollback_lines: config.general.scrollback_lines,
             default_shell: config.general.default_shell.clone(),
@@ -208,22 +223,56 @@ impl SettingsDraft {
         }
     }
 
+    /// The background this draft actually renders with: the override if one
+    /// is set, otherwise whichever theme is currently selected. Also what
+    /// the color picker shows, so unchecking "Follow theme" starts from the
+    /// color already on screen rather than snapping to something else.
+    fn effective_background(&self) -> [f32; 3] {
+        match self.background_color {
+            Some(rgb) => rgb,
+            None => config::Appearance { theme: self.theme.clone(), ..Default::default() }.background_rgb(),
+        }
+    }
+
     /// Applies the draft's edits onto a clone of `base` — anything the
-    /// panel doesn't expose (theme, keybinding overrides) passes through
+    /// panel doesn't expose (keybinding overrides) passes through
     /// untouched, so saving from the panel can never silently drop a
     /// hand-edited setting the panel has no field for.
     fn apply_to(&self, base: &config::Config) -> config::Config {
         let mut config = base.clone();
-        config.appearance.set_background_rgb(self.background_color);
+        config.appearance.theme = self.theme.clone();
+        match self.background_color {
+            Some(rgb) => config.appearance.set_background_rgb(rgb),
+            None => config.appearance.follow_theme_background(),
+        }
         config.appearance.set_accent_rgb(self.accent_color);
         config.appearance.font_family = self.font_family.clone();
         config.appearance.font_size = self.font_size;
+        config.appearance.ligatures = self.ligatures;
         config.appearance.transparency = self.transparency;
         config.general.scrollback_lines = self.scrollback_lines;
         config.general.default_shell = self.default_shell.clone();
         config.cursor.style = self.cursor_style;
         config
     }
+}
+
+/// Theme names matching `filter` (case-insensitive substring; empty matches
+/// everything), capped at `limit`.
+///
+/// Returns whether the list was truncated, so the panel can say so rather
+/// than leaving someone scrolling a list that silently stops short of the
+/// theme they're looking for.
+fn filtered_themes(filter: &str, limit: usize) -> (Vec<&'static str>, bool) {
+    let needle = filter.trim().to_lowercase();
+    let mut matches = config::themes::THEMES
+        .iter()
+        .map(|theme| theme.name)
+        .filter(|name| needle.is_empty() || name.to_lowercase().contains(&needle));
+
+    let shown: Vec<&'static str> = matches.by_ref().take(limit).collect();
+    let truncated = matches.next().is_some();
+    (shown, truncated)
 }
 
 impl Ui {
@@ -793,6 +842,39 @@ impl Ui {
                             egui::Grid::new("settings-appearance").num_columns(2).spacing([GRID_COLUMN_GAP, 9.0]).show(
                                 ui,
                                 |ui| {
+                                    grid_label(ui, "Theme", label_width);
+                                    egui::ComboBox::from_id_salt("theme")
+                                        .width(value_width)
+                                        .selected_text(&draft.theme)
+                                        .show_ui(ui, |ui| {
+                                            // The filter lives inside the
+                                            // dropdown so it's right where
+                                            // the list is, and resets each
+                                            // time the panel reopens.
+                                            ui.add(
+                                                egui::TextEdit::singleline(&mut draft.theme_filter)
+                                                    .hint_text("Filter…")
+                                                    .desired_width(f32::INFINITY),
+                                            );
+                                            ui.separator();
+
+                                            let (names, truncated) =
+                                                filtered_themes(&draft.theme_filter, THEME_LIST_LIMIT);
+                                            if names.is_empty() {
+                                                ui.weak("No matching theme");
+                                            }
+                                            egui::ScrollArea::vertical().max_height(THEME_LIST_HEIGHT).show(ui, |ui| {
+                                                for name in names {
+                                                    ui.selectable_value(&mut draft.theme, name.to_string(), name);
+                                                }
+                                            });
+                                            if truncated {
+                                                ui.separator();
+                                                ui.weak(format!("Showing first {THEME_LIST_LIMIT} — keep typing"));
+                                            }
+                                        });
+                                    ui.end_row();
+
                                     grid_label(ui, "Font", label_width);
                                     let selected = if draft.font_family.is_empty() {
                                         "monospace (system default)"
@@ -822,8 +904,41 @@ impl Ui {
                                     slider_field(ui, value_width, egui::Slider::new(&mut draft.font_size, 6.0..=48.0));
                                     ui.end_row();
 
+                                    grid_label(ui, "Ligatures", label_width);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(value_width, ui.spacing().interact_size.y),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.checkbox(&mut draft.ligatures, "Enable").on_hover_text(LIGATURES_HINT);
+                                        },
+                                    );
+                                    ui.end_row();
+
                                     grid_label(ui, "Background", label_width);
-                                    color_field(ui, value_width, &mut draft.background_color);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(value_width, ui.spacing().interact_size.y),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            let mut follows = draft.background_color.is_none();
+                                            if ui.checkbox(&mut follows, "Follow theme").changed() {
+                                                // Unchecking seeds the picker
+                                                // from the color already on
+                                                // screen, so taking manual
+                                                // control never changes the
+                                                // background by itself.
+                                                draft.background_color =
+                                                    if follows { None } else { Some(draft.effective_background()) };
+                                            }
+                                            if let Some(rgb) = &mut draft.background_color {
+                                                ui.color_edit_button_rgb(rgb);
+                                            } else {
+                                                let mut themed = draft.effective_background();
+                                                ui.add_enabled(false, |ui: &mut egui::Ui| {
+                                                    ui.color_edit_button_rgb(&mut themed)
+                                                });
+                                            }
+                                        },
+                                    );
                                     ui.end_row();
 
                                     grid_label(ui, "Accent", label_width);
@@ -1169,6 +1284,25 @@ const LABEL_COL_FRACTION: f32 = 0.26;
 /// `spacing.x`, kept as one named constant so the column-width math above
 /// and the `Grid::spacing` calls below can never silently drift apart.
 const GRID_COLUMN_GAP: f32 = 12.0;
+
+/// How many themes the picker lists at once, and how tall that list gets.
+///
+/// There are hundreds of built-in themes; rendering every match would build
+/// hundreds of widgets each frame the dropdown is open, for a list nobody
+/// can scan anyway. The cap is paired with a "keep typing" note so a
+/// truncated list never silently masquerades as the complete set.
+const THEME_LIST_LIMIT: usize = 100;
+const THEME_LIST_HEIGHT: f32 = 260.0;
+
+/// Why the ligature checkbox is off by default, in the one place a user is
+/// actually asking the question. Names fonts rather than saying "a suitable
+/// font", since "is mine one?" is the immediate next question.
+const LIGATURES_HINT: &str = "\
+Render character pairs like != and => as single glyphs.
+
+Needs a font that provides them — Fira Code, JetBrains Mono, Cascadia Code, \
+Iosevka. With any other font this has no visible effect, and with one whose \
+ligature widths don't match its cell width, text can drift out of alignment.";
 
 /// A small-caps-style section label (e.g. "BROADCAST", "APPEARANCE") for the
 /// context menu and settings panel, matching the design pass's bordered-
@@ -1556,5 +1690,104 @@ mod tests {
     fn height_always_leaves_room_for_the_window_edge() {
         let (_, h) = fit_popup(240.0, 1000.0, 500.0);
         assert!(h < 500.0, "must not claim the full window height");
+    }
+
+    #[test]
+    fn an_empty_theme_filter_matches_everything_up_to_the_cap() {
+        let (names, truncated) = filtered_themes("", THEME_LIST_LIMIT);
+        assert_eq!(names.len(), THEME_LIST_LIMIT);
+        assert!(truncated, "the full collection is larger than the cap");
+        assert_eq!(names[0], config::themes::DEFAULT_THEME, "the default should lead the unfiltered list");
+    }
+
+    #[test]
+    fn the_theme_filter_is_a_case_insensitive_substring_match() {
+        let (names, _) = filtered_themes("dracula", THEME_LIST_LIMIT);
+        assert!(names.contains(&"Dracula"));
+        assert!(names.iter().all(|name| name.to_lowercase().contains("dracula")));
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_returns_an_empty_untruncated_list() {
+        let (names, truncated) = filtered_themes("no such theme anywhere", THEME_LIST_LIMIT);
+        assert!(names.is_empty());
+        assert!(!truncated, "an empty result is complete, not truncated");
+    }
+
+    /// The cap exists so the dropdown doesn't build hundreds of widgets, but
+    /// a truncated list must be *reported* as truncated — silently showing
+    /// a prefix reads as "that's all there is".
+    #[test]
+    fn truncation_is_reported_only_when_matches_were_actually_dropped() {
+        let (names, truncated) = filtered_themes("", 5);
+        assert_eq!(names.len(), 5);
+        assert!(truncated);
+
+        let (names, truncated) = filtered_themes("", config::themes::THEMES.len());
+        assert_eq!(names.len(), config::themes::THEMES.len());
+        assert!(!truncated, "a list showing everything is not truncated");
+    }
+
+    #[test]
+    fn a_draft_round_trips_a_theme_and_a_followed_background() {
+        let config = config::Config::default();
+        let mut draft = SettingsDraft::from_config(&config);
+        assert!(draft.background_color.is_none(), "the default follows its theme");
+
+        draft.theme = "Dracula".to_string();
+        let saved = draft.apply_to(&config);
+
+        assert_eq!(saved.appearance.theme, "Dracula");
+        assert!(saved.appearance.follows_theme_background());
+        assert_eq!(saved.appearance.background_rgb(), [0x28 as f32 / 255.0, 0x2a as f32 / 255.0, 0x36 as f32 / 255.0]);
+    }
+
+    /// An override has to survive the round-trip, and has to keep winning
+    /// over whatever theme is chosen alongside it.
+    #[test]
+    fn a_draft_round_trips_an_overridden_background() {
+        let config = config::Config::default();
+        let mut draft = SettingsDraft::from_config(&config);
+        draft.theme = "Dracula".to_string();
+        draft.background_color = Some([1.0, 0.0, 0.0]);
+
+        let saved = draft.apply_to(&config);
+        assert!(!saved.appearance.follows_theme_background());
+        assert_eq!(saved.appearance.background_rgb(), [1.0, 0.0, 0.0]);
+
+        // ...and reopening the panel shows it as an override, not as
+        // following the theme.
+        let reopened = SettingsDraft::from_config(&saved);
+        assert_eq!(reopened.background_color, Some([1.0, 0.0, 0.0]));
+    }
+
+    /// Unchecking "Follow theme" seeds the picker from what's already on
+    /// screen, so taking manual control doesn't change the background by
+    /// itself.
+    #[test]
+    fn the_effective_background_tracks_the_theme_until_overridden() {
+        let config = config::Config::default();
+        let mut draft = SettingsDraft::from_config(&config);
+        draft.theme = "Dracula".to_string();
+
+        let themed = draft.effective_background();
+        assert_eq!(themed, [0x28 as f32 / 255.0, 0x2a as f32 / 255.0, 0x36 as f32 / 255.0]);
+
+        draft.background_color = Some(themed);
+        assert_eq!(draft.effective_background(), themed, "taking control must not shift the color");
+    }
+
+    /// A config with a theme the build doesn't have (hand-edited, or written
+    /// by a newer version) must fall back rather than fail.
+    #[test]
+    fn an_unknown_theme_name_survives_a_draft_round_trip_but_renders_the_default() {
+        let mut config = config::Config::default();
+        config.appearance.theme = "Nonexistent".to_string();
+
+        let draft = SettingsDraft::from_config(&config);
+        let saved = draft.apply_to(&config);
+
+        assert_eq!(saved.appearance.theme, "Nonexistent", "the name is preserved, not silently rewritten");
+        assert_eq!(saved.appearance.resolved_theme().name, config::themes::DEFAULT_THEME);
     }
 }
